@@ -1,6 +1,6 @@
 use crate::analysis::Data;
 use crate::config::Config;
-use crate::loader::Base;
+use crate::loader::load_m2;
 use crate::openai::Api;
 use clap::Parser;
 use futures;
@@ -24,18 +24,9 @@ async fn main() {
 
     let openai = Api::new(config.api_key, config.url, config.model);
 
-    let requests: Vec<Base> = vec![
-        Base::new(
-            "Respond with 'Hello' and nothing else.".into(),
-            vec!["Hello".into(), "Hello".into()],
-        ),
-        Base::new(
-            "Respond with 'world' and nothing else.".into(),
-            vec!["World".into(), "World".into()],
-        ),
-    ];
+    let kolla = load_m2("data/KoLLA_multi-refs.m2").expect("Failed to load Kolla data.");
 
-    let responses = futures::stream::iter(requests)
+    let responses = futures::stream::iter(kolla)
         .map(async |request| {
             let mut attempt = 0;
             let response = loop {
