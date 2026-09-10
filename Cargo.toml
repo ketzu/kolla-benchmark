@@ -1,0 +1,16 @@
+[package]
+name = "kolla-benchmark"
+version = "0.1.0"
+edition = "2024"
+
+authors = ["david Mödinger <david.moedinger@ketzu.net"]
+description = "Utility to benchmark KoLLa v2 against an OpenAI compatible endpoint."
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive", "env"] }
+reqwest = { version = "0.13.5", features = ["json"] }
+serdev = "0.3.2"
+tokio = { version = "1.53.1", features = ["full"] }
+url = "2.5.8"
+eyre = "0.6.14"
+futures = "0.3.34"
