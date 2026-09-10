@@ -2,31 +2,43 @@ use reqwest::Client;
 use serdev::{Deserialize, Serialize};
 use url::Url;
 
+pub const DEFAULT_PROMPT: &str =
+    "Correct the Korean sentence. Reply with the corrected sentence only.";
+
 #[derive(Debug)]
 pub struct Api {
     api_key: String,
     base: Url,
     model: String,
+    prompt: String,
     client: Client,
 }
 
 impl Api {
-    pub fn new(api_key: String, base: Url, model: String) -> Api {
+    pub fn new(api_key: String, base: Url, model: String, prompt: String) -> Api {
         Api {
             api_key,
             base,
             model,
+            prompt,
             client: Client::new(),
         }
     }
 
-    pub async fn send(&self, message: String) -> Result<Response, eyre::Report> {
+    /// Send one challenge sentence, wrapped in the run's prompt.
+    pub async fn send(&self, challenge: String) -> Result<Response, eyre::Report> {
         let request = Request {
             model: self.model.clone(),
-            messages: vec![Message {
-                content: Some(message),
-                role: "user".into(),
-            }],
+            messages: vec![
+                Message {
+                    role: "system".into(),
+                    content: Some(self.prompt.clone()),
+                },
+                Message {
+                    role: "user".into(),
+                    content: Some(challenge),
+                },
+            ],
         };
         let response = self
             .client

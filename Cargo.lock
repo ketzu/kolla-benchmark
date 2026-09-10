@@ -806,6 +806,7 @@ dependencies = [
  "eyre",
  "futures",
  "reqwest",
+ "serde_json",
  "serdev",
  "tokio",
  "url",
