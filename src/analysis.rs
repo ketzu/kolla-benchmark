@@ -430,14 +430,11 @@ A -1 -1|||noop|||-NONE-|||REQUIRED|||-NONE-|||1
     fn answered(text: &str) -> Data {
         let base = parse_m2(SAMPLE).unwrap().remove(0);
         let response = Response {
-            id: "test".into(),
-            model: "test".into(),
             choices: vec![Choice {
                 message: Message {
                     role: "assistant".into(),
                     content: Some(text.into()),
                 },
-                finish_reason: None,
             }],
             usage: None,
         };

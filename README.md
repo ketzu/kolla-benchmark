@@ -19,7 +19,10 @@ Model execution and scoring are separate, and two of the three modes cost nothin
 `--limit` defaults to **25 sentences** so that a mistyped command cannot cost much;
 `--limit 0` runs all 1418. Other flags: `--url`, `--prompt`, `--data`, `--concurrency`,
 `--output`, and `--api-key` (also read from `API_KEY`). A sentence that keeps failing is
-recorded in `failures` rather than aborting the run.
+recorded in `failures`; three consecutive retry-exhausted transient failures stop the run.
+Retryable requests honor `Retry-After` when provided and otherwise use capped exponential
+backoff with jitter. Retry and failure details are written to stderr with sentence progress.
+Individual HTTP requests time out after 120 seconds.
 
 Each run is written as one JSON file containing the provenance (model, endpoint, prompt,
 dataset path and hash, tool version, timestamp), the corpus metrics, and every sentence
