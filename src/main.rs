@@ -16,6 +16,8 @@ mod analysis;
 mod config;
 mod loader;
 mod openai;
+pub mod python_scorer;
+#[allow(dead_code)]
 mod scorer;
 
 /// Retries per sentence before it is recorded as a failure.

@@ -25,3 +25,8 @@ target
 /target
 
 .env
+data/*.csv
+results/
+pre-rescore/
+**/*.pyc
+**/__pycache__/

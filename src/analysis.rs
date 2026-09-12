@@ -2,6 +2,7 @@
 
 use crate::loader::Base;
 use crate::openai::Response;
+use crate::python_scorer;
 use crate::scorer::{self, Counts, Metrics, SentenceScore};
 use eyre::{Context, ContextCompat, Result};
 use serdev::{Deserialize, Serialize};
@@ -50,7 +51,7 @@ impl Data {
     /// Tokenize the answer and score it again — the only place scoring is applied.
     pub fn rescore(&mut self) {
         self.answer_tokens = scorer::tokenize(&self.answer);
-        self.score = scorer::score(
+        self.score = python_scorer::score(
             &self.base.tokens,
             &self.answer_tokens,
             &self.base.references,
@@ -340,7 +341,7 @@ pub fn baselines(corpus: &[Base]) -> String {
 
     for base in corpus {
         // A model that answers with the sentence it was given: no edit is ever right.
-        unchanged.add(scorer::score(&base.tokens, &base.tokens, &base.references).counts);
+        unchanged.add(python_scorer::score(&base.tokens, &base.tokens, &base.references).counts);
 
         for (index, reference) in base.references.iter().enumerate() {
             annotations += 1;
@@ -348,7 +349,7 @@ pub fn baselines(corpus: &[Base]) -> String {
             // One annotator scored the way a model is scored — through the tokenizer, and
             // against every reference including their own. This is the human ceiling.
             let answer = scorer::tokenize(&reference.sentence);
-            human.add(scorer::score(&base.tokens, &answer, &base.references).counts);
+            human.add(python_scorer::score(&base.tokens, &answer, &base.references).counts);
 
             // The annotation as tokenized by the corpus itself. Where the tokenizer
             // disagrees with it, a model is scored on tokenization, not on grammar.
@@ -362,7 +363,8 @@ pub fn baselines(corpus: &[Base]) -> String {
             // An annotation scored against nothing but itself should reproduce exactly
             // its own edits. Where it does not, the human edits do not lie on a
             // minimum distance alignment and MaxMatch cannot express them.
-            let (counts, _) = scorer::score_against(&base.tokens, &corpus_tokens, &reference.edits);
+            let (counts, _) =
+                python_scorer::score_against(&base.tokens, &corpus_tokens, &reference.edits);
             if counts.tp as usize != reference.edits.len() {
                 unreachable.push(format!(
                     "  annotator {index} of {:?}: {} of {} edits",
@@ -427,8 +429,16 @@ A 2 3|||R:SPELL|||고팠습니다|||REQUIRED|||-NONE-|||0
 A -1 -1|||noop|||-NONE-|||REQUIRED|||-NONE-|||1
 ";
 
+    const LONG_EDIT_SAMPLE: &str = "S a b c d e f g h i
+A 0 7|||R:TEST|||x y z q r s t|||REQUIRED|||-NONE-|||0
+";
+
     fn answered(text: &str) -> Data {
-        let base = parse_m2(SAMPLE).unwrap().remove(0);
+        answered_from(SAMPLE, text)
+    }
+
+    fn answered_from(sample: &str, text: &str) -> Data {
+        let base = parse_m2(sample).unwrap().remove(0);
         let response = Response {
             choices: vec![Choice {
                 message: Message {
@@ -455,6 +465,21 @@ A -1 -1|||noop|||-NONE-|||REQUIRED|||-NONE-|||1
         assert_eq!(unchanged.score.reference, 1);
         assert_eq!(unchanged.score.counts.tp, 0);
         assert!(unchanged.unchanged());
+    }
+
+    #[test]
+    fn rescore_uses_the_python_graph_implementation() {
+        let data = answered_from(LONG_EDIT_SAMPLE, "x y z q r s t h i");
+
+        assert_eq!(
+            (
+                data.score.counts.tp,
+                data.score.counts.fp,
+                data.score.counts.fneg
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(data.score.edits[0].end, 7);
     }
 
     #[test]
