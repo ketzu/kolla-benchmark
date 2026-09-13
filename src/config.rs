@@ -1,4 +1,4 @@
-use crate::openai::DEFAULT_PROMPT;
+use crate::openai::{DEFAULT_PROMPT, SENTENCE_PLACEHOLDER};
 use clap::Parser;
 use std::path::PathBuf;
 use url::Url;
@@ -15,8 +15,8 @@ pub struct Config {
     /// Base URL for OpenAI compatible request
     #[arg(short, long, default_value = "https://openrouter.ai/api/v1")]
     pub url: Url,
-    /// Instruction the challenge sentence is wrapped in
-    #[arg(long, default_value = DEFAULT_PROMPT)]
+    /// Prompt template; {sentence} is replaced by the challenge sentence
+    #[arg(long, default_value = DEFAULT_PROMPT, value_parser = prompt_template)]
     pub prompt: String,
     /// KoLLA M2 annotations to evaluate against
     #[arg(short, long, default_value = "data/KoLLA_multi-refs.m2")]
@@ -36,4 +36,13 @@ pub struct Config {
     /// Score the corpus against itself instead of calling the API
     #[arg(long, conflicts_with_all = ["api_key", "model", "rescore"])]
     pub baseline: bool,
+}
+
+/// A prompt without the placeholder would never show the model the sentence.
+fn prompt_template(prompt: &str) -> Result<String, String> {
+    if prompt.contains(SENTENCE_PLACEHOLDER) {
+        Ok(prompt.to_owned())
+    } else {
+        Err(format!("the prompt must contain {SENTENCE_PLACEHOLDER}"))
+    }
 }

@@ -6,7 +6,17 @@ Goal of this benchmark is to score LLMs on zero-shot corrections for korean lang
 
 ## Structure
 
-The benchmark uses an OpenAI compatible endpoint to score the [KoLLA v2](data/README.md) dataset with the prompt `Correct the Korean sentence. Reply with the corrected sentence only. {sentence}`.
+The benchmark uses an OpenAI compatible endpoint to score the [KoLLA v2](data/README.md) dataset.
+The sentence is substituted for `{sentence}` in the following prompt, which is sent as a single user message:
+
+```
+아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.
+단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.
+문장: {sentence}
+교정문:
+```
+
+A different template can be passed with `--prompt`; it must contain `{sentence}`.
 
 KoLLA v2 contains two annotations and the result from the API is scored against both.
 The better score is chosen for that particular sentence.
@@ -61,7 +71,7 @@ Options:
       --api-key <API_KEY>          API Key to send along with requests [env: API_KEY=]
   -m, --model <MODEL>              Model to evaluate
   -u, --url <URL>                  Base URL for OpenAI compatible request [default: https://openrouter.ai/api/v1]
-      --prompt <PROMPT>            Instruction the challenge sentence is wrapped in [default: "Correct the Korean sentence. Reply with the corrected sentence only."]
+      --prompt <PROMPT>            Prompt template; {sentence} is replaced by the challenge sentence [default: "아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.\n단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.\n문장: {sentence}\n교정문:"]
   -d, --data <DATA>                KoLLA M2 annotations to evaluate against [default: data/KoLLA_multi-refs.m2]
   -l, --limit <LIMIT>              Sentences to evaluate; 0 runs the whole corpus (that costs real money) [default: 25]
   -c, --concurrency <CONCURRENCY>  Requests in flight at the same time [default: 10]

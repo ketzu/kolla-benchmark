@@ -5,8 +5,12 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 use url::Url;
 
-pub const DEFAULT_PROMPT: &str =
-    "Correct the Korean sentence. Reply with the corrected sentence only.";
+/// Placeholder in the prompt that is replaced by the challenge sentence.
+pub const SENTENCE_PLACEHOLDER: &str = "{sentence}";
+pub const DEFAULT_PROMPT: &str = "아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.\n\
+단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.\n\
+문장: {sentence}\n\
+교정문:";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// An API failure with enough metadata to decide whether retrying is safe.
@@ -107,21 +111,9 @@ impl Api {
         }
     }
 
-    /// Send one challenge sentence, wrapped in the run's prompt.
+    /// Send one challenge sentence, substituted into the run's prompt template.
     pub async fn send(&self, challenge: String) -> Result<Response, ApiError> {
-        let request = Request {
-            model: self.model.clone(),
-            messages: vec![
-                Message {
-                    role: "system".into(),
-                    content: Some(self.prompt.clone()),
-                },
-                Message {
-                    role: "user".into(),
-                    content: Some(challenge),
-                },
-            ],
-        };
+        let request = self.request(&challenge);
         let response = self
             .client
             .post(self.url())
@@ -139,6 +131,17 @@ impl Api {
             .error_for_status()
             .map_err(|error| ApiError::response(error, status, retry_after))?;
         response.json().await.map_err(ApiError::decode)
+    }
+
+    /// The whole prompt goes out as a single user message, ending in the answer cue.
+    fn request(&self, challenge: &str) -> Request {
+        Request {
+            model: self.model.clone(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: Some(self.prompt.replace(SENTENCE_PLACEHOLDER, challenge)),
+            }],
+        }
     }
 
     fn url(&self) -> Url {
@@ -237,6 +240,30 @@ mod tests {
         assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn substitutes_the_sentence_into_a_single_user_message() {
+        let api = Api::new(
+            "test-key".into(),
+            Url::parse("http://localhost").unwrap(),
+            "test-model".into(),
+            DEFAULT_PROMPT.into(),
+        );
+
+        let request = api.request("저는 학교에 갔어요.");
+
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, "user");
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some(
+                "아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.\n\
+                 단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.\n\
+                 문장: 저는 학교에 갔어요.\n\
+                 교정문:"
+            )
+        );
     }
 
     #[tokio::test]
