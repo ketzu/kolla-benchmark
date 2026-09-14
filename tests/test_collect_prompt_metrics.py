@@ -34,6 +34,7 @@ class CollectPromptMetricsTests(unittest.TestCase):
                 {
                     "provenance": {
                         "model": "provider/model",
+                        "endpoint": "https://openrouter.ai/api/v1",
                         "prompt": "Correct it. {sentence}",
                         "started": "2026-09-14T10:00:00Z",
                     },
@@ -51,12 +52,23 @@ class CollectPromptMetricsTests(unittest.TestCase):
                 },
             )
 
-            (row,) = collect_rows(root / "results", prompt_file)
+            model_info_file = root / "model-info.csv"
+            model_info_file.write_text(
+                "model,company,params,quantization,file_bytes\nprovider/model,Maker,3B,Q8_0,1234\n",
+                encoding="utf-8",
+            )
+
+            (row,) = collect_rows(root / "results", prompt_file, model_info_file)
 
             self.assertEqual(
                 row,
                 {
                     "model": "provider/model",
+                    "provider": "openrouter",
+                    "company": "Maker",
+                    "params": "3B",
+                    "quantization": "Q8_0",
+                    "file_bytes": "1234",
                     "prompt_name": "simple",
                     "prompt_type": "user",
                     "precision": 0.5,
@@ -99,7 +111,7 @@ class CollectPromptMetricsTests(unittest.TestCase):
                     results_dir / name, {"provenance": {"model": "m", **prompt}}
                 )
 
-            rows = collect_rows(results_dir, prompt_file)
+            rows = collect_rows(results_dir, prompt_file, root / "model-info.csv")
 
             variants = {row["file"]: (row["prompt_name"], row["prompt_type"]) for row in rows}
             self.assertEqual(

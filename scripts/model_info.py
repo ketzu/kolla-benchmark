@@ -1,0 +1,54 @@
+"""Describe the model behind a run: who served it, who made it, and in what form it ran.
+
+Shared by ``collect_metrics.py`` and ``collect_prompt_metrics.py``. A result only records the model
+id and endpoint, so everything but the provider comes from a hand-maintained model info file.
+"""
+
+from __future__ import annotations
+
+import csv
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+
+# Columns the collectors add after the model.
+COLUMNS = ["provider", "company", "params", "quantization", "file_bytes"]
+INFO_COLUMNS = COLUMNS[1:]
+
+# Providers by the host and port of their endpoint; any other endpoint is named by its host.
+KNOWN_ENDPOINTS = {
+    "openrouter.ai": "openrouter",
+    "localhost:1234": "lmstudio",
+    "127.0.0.1:1234": "lmstudio",
+}
+
+
+def provider(endpoint: str | None) -> str:
+    """Who served a run, named after the endpoint it was sent to."""
+    if not endpoint:
+        return ""
+    location = urlsplit(endpoint).netloc
+    return KNOWN_ENDPOINTS.get(location, location)
+
+
+def load(info_file: Path) -> dict[str, dict[str, str]]:
+    """Map every model id of the model info file to its described columns."""
+    if not info_file.is_file():
+        return {}
+    with info_file.open(newline="", encoding="utf-8") as handle:
+        return {
+            row["model"]: {column: row.get(column) or "" for column in INFO_COLUMNS}
+            for row in csv.DictReader(handle)
+            if row.get("model")
+        }
+
+
+def describe(provenance: Mapping[str, Any], models: Mapping[str, Mapping[str, str]]) -> dict[str, str]:
+    """The model columns of a run; a model missing from the info file leaves its cells empty."""
+    known = models.get(provenance["model"], {})
+    return {
+        "provider": provider(provenance.get("endpoint")),
+        **{column: known.get(column, "") for column in INFO_COLUMNS},
+    }

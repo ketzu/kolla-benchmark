@@ -6,13 +6,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_info  # noqa: E402
+
 
 COLUMNS = [
     "model",
+    *model_info.COLUMNS,
     "precision",
     "recall",
     "f05",
@@ -51,9 +56,12 @@ def _load_costs(cost_file: Path) -> dict[str, str]:
         }
 
 
-def collect_rows(results_dir: Path, cost_file: Path) -> list[dict[str, Any]]:
+def collect_rows(
+    results_dir: Path, cost_file: Path, model_info_file: Path
+) -> list[dict[str, Any]]:
     """Return one flattened row for every JSON result below ``results_dir``."""
     costs = _load_costs(cost_file)
+    models = model_info.load(model_info_file)
     rows: list[dict[str, Any]] = []
 
     for result_file in sorted(results_dir.rglob("*.json")):
@@ -76,6 +84,7 @@ def collect_rows(results_dir: Path, cost_file: Path) -> list[dict[str, Any]]:
         rows.append(
             {
                 "model": model,
+                **model_info.describe(provenance, models),
                 "precision": _section_value(payload, "metrics", "precision"),
                 "recall": _section_value(payload, "metrics", "recall"),
                 "f05": _section_value(payload, "metrics", "f05"),
@@ -108,6 +117,7 @@ def write_report(output: Path, rows: list[Mapping[str, Any]]) -> None:
 def parse_args() -> argparse.Namespace:
     repository_root = Path(__file__).resolve().parents[1]
     default_results_dir = repository_root / "results"
+    default_model_info_file = repository_root / "scripts" / "model-info.csv"
     parser = argparse.ArgumentParser(
         description="Collect benchmark metrics from all result JSON files."
     )
@@ -116,6 +126,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=default_results_dir,
         help=f"root directory to scan (default: {default_results_dir})",
+    )
+    parser.add_argument(
+        "--model-info",
+        type=Path,
+        default=default_model_info_file,
+        help=f"CSV describing each model (default: {default_model_info_file})",
     )
     parser.add_argument(
         "--cost-file",
@@ -134,7 +150,7 @@ def main() -> None:
     args = parse_args()
     cost_file = args.cost_file or args.results_dir / "cost.csv"
     output = args.output or args.results_dir / "metrics.csv"
-    rows = collect_rows(args.results_dir, cost_file)
+    rows = collect_rows(args.results_dir, cost_file, args.model_info)
     write_report(output, rows)
     print(f"wrote {len(rows)} rows to {output}")
 

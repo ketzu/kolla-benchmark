@@ -11,14 +11,19 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_info  # noqa: E402
 
 
 # No cost column: the cost file holds one total per model, which a prompt split cannot divide.
 COLUMNS = [
     "model",
+    *model_info.COLUMNS,
     "prompt_name",
     "prompt_type",
     "precision",
@@ -87,9 +92,12 @@ def _section_value(payload: Mapping[str, Any], section_name: str, key: str) -> A
     return section.get(key, 0)
 
 
-def collect_rows(results_dir: Path, prompt_file: Path) -> list[dict[str, Any]]:
+def collect_rows(
+    results_dir: Path, prompt_file: Path, model_info_file: Path
+) -> list[dict[str, Any]]:
     """Return one row, labelled with its prompt variant, for every JSON result below ``results_dir``."""
     prompts = load_prompts(prompt_file)
+    models = model_info.load(model_info_file)
     rows: list[dict[str, Any]] = []
 
     for result_file in sorted(results_dir.rglob("*.json")):
@@ -111,6 +119,7 @@ def collect_rows(results_dir: Path, prompt_file: Path) -> list[dict[str, Any]]:
         rows.append(
             {
                 "model": provenance["model"],
+                **model_info.describe(provenance, models),
                 "prompt_name": prompts.get((system, user), UNKNOWN_PROMPT),
                 "prompt_type": prompt_type(system),
                 "precision": _section_value(payload, "metrics", "precision"),
@@ -170,6 +179,7 @@ def parse_args() -> argparse.Namespace:
     repository_root = Path(__file__).resolve().parents[1]
     default_results_dir = repository_root / "results"
     default_prompt_file = repository_root / "scripts" / "prompts.json"
+    default_model_info_file = repository_root / "scripts" / "model-info.csv"
     parser = argparse.ArgumentParser(
         description="Collect the metrics of a multi-prompt experiment, split by prompt variant."
     )
@@ -184,6 +194,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=default_prompt_file,
         help=f"prompt file naming the prompts runs are matched against (default: {default_prompt_file})",
+    )
+    parser.add_argument(
+        "--model-info",
+        type=Path,
+        default=default_model_info_file,
+        help=f"CSV describing each model (default: {default_model_info_file})",
     )
     parser.add_argument(
         "--output",
@@ -203,7 +219,7 @@ def main() -> None:
     output = args.output or args.results_dir / "prompt-metrics.csv"
     matrix_output = args.matrix_output or args.results_dir / "prompt-matrix.csv"
 
-    rows = collect_rows(args.results_dir, args.prompts)
+    rows = collect_rows(args.results_dir, args.prompts, args.model_info)
     write_csv(output, COLUMNS, rows)
     print(f"wrote {len(rows)} rows to {output}")
 

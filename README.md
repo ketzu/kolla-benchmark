@@ -67,6 +67,14 @@ uv run --no-project python ./scripts/collect_metrics.py
 The aggregation script recursively scans `results/`, reads `results/cost.csv`, and writes
 `results/metrics.csv`.
 
+Both this script and the multi-prompt collector describe each run's model next to its id.
+`provider` comes from the run's endpoint (`openrouter`, `lmstudio`, or the endpoint's host).
+`company`, `params`, `quantization` and `file_bytes` come from
+[scripts/model-info.csv](scripts/model-info.csv), which is maintained by hand. A model missing
+from that file gets empty cells. For LM Studio models, `lms ls --json` lists the parameters,
+quantization and file size. OpenRouter doesn't expose how a hosted model is served, so those
+cells stay empty.
+
 Full command usage:
 
 ```bash

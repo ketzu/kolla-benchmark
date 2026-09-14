@@ -1,0 +1,31 @@
+model,company,params,quantization,file_bytes
+anthropic/claude-haiku-4.5,Anthropic,,,
+anthropic/claude-opus-5,Anthropic,,,
+anthropic/claude-sonnet-5,Anthropic,,,
+deepseek/deepseek-r1-0528-qwen3-8b,DeepSeek,8B,Q4_K_M,5027844358
+deepseek/deepseek-v4.1-flash,DeepSeek,,,
+google/gemini-3.1-pro-preview,Google,,,
+google/gemini-3.5-flash-lite,Google,,,
+google/gemini-3.7-flash,Google,,,
+google/gemma-4-26b-a4b,Google,26B-A4B,Q4_K_M,17990911801
+google/gemma-4-e4b,Google,7.5B,Q4_K_M,6326932336
+kanana-2-30b-a3b-thinking-2601,Kakao,30B-A3B,Q4_K_M,18596926752
+kanana-2-3b-instruct-i1,Kakao,3B,Q6_K,2884436128
+meta/muse-glimmer,Meta,28B,Q4_K_M,18157122004
+minimax/minimax-m3,MiniMax,,,
+mistralai/ministral-3-14b-reasoning,Mistral AI,14B,Q4_K_M,9117141778
+mistralai/ministral-3-3b,Mistral AI,3B,Q8_0,4491998767
+moonshotai/kimi-k3,Moonshot AI,,,
+nvidia/nemotron-3-nano-4b,NVIDIA,4B,Q8_0,4233778565
+openai/gpt-5.6-luna,OpenAI,,,
+openai/gpt-5.6-sol,OpenAI,,,
+openai/gpt-5.6-terra,OpenAI,,,
+openai/gpt-oss-20b,OpenAI,20B,MXFP4,12109664217
+qwen/qwen3.8-27b,Alibaba,27B,Q4_K_M,17742040464
+qwen/qwen3.8-flash,Alibaba,,,
+qwen/qwen3.8-max-0902,Alibaba,,,
+tencent/hy4-preview,Tencent,,,
+x-ai/grok-4.6,xAI,,,
+xiaomi/mimo-v2.5,Xiaomi,,,
+z-ai/glm-5.3,Z.ai,,,
+z-ai/glm-5.3-flash,Z.ai,,,
