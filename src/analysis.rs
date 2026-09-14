@@ -164,6 +164,7 @@ impl Run {
             started,
             model,
             endpoint,
+            system,
             prompt,
             dataset,
             ..
@@ -175,10 +176,13 @@ impl Run {
         } = self.metrics;
         let scored = self.results.len();
         let mut report = String::new();
+        let _ = write!(report, "\n{model} on {endpoint}\n");
+        if let Some(system) = system {
+            let _ = writeln!(report, "system    {system:?}");
+        }
         let _ = write!(
             report,
-            "\n{model} on {endpoint}\n\
-               prompt    {prompt:?}\n\
+            "prompt    {prompt:?}\n\
                data      {} ({} sentences, fnv1a64 {})\n\
                run       {tool}, {started}\n\
              \n\
@@ -247,6 +251,9 @@ pub struct Provenance {
     pub started_unix: u64,
     pub model: String,
     pub endpoint: String,
+    /// The system prompt, if one was sent; runs written before it existed read as none.
+    #[serde(default)]
+    pub system: Option<String>,
     pub prompt: String,
     pub dataset: Dataset,
     /// When the stored answers were scored again with a newer scorer.
@@ -254,7 +261,13 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    pub fn new(model: String, endpoint: String, prompt: String, dataset: Dataset) -> Self {
+    pub fn new(
+        model: String,
+        endpoint: String,
+        system: Option<String>,
+        prompt: String,
+        dataset: Dataset,
+    ) -> Self {
         let started_unix = unix_now();
         Provenance {
             tool: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
@@ -262,6 +275,7 @@ impl Provenance {
             started_unix,
             model,
             endpoint,
+            system,
             prompt,
             dataset,
             rescored: None,

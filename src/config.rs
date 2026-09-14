@@ -15,7 +15,10 @@ pub struct Config {
     /// Base URL for OpenAI compatible request
     #[arg(short, long, default_value = "https://openrouter.ai/api/v1")]
     pub url: Url,
-    /// Prompt template; {sentence} is replaced by the challenge sentence
+    /// System prompt sent before the user message; no system message is sent without it
+    #[arg(long)]
+    pub system: Option<String>,
+    /// User prompt template; {sentence} is replaced by the challenge sentence
     #[arg(long, default_value = DEFAULT_PROMPT, value_parser = prompt_template)]
     pub prompt: String,
     /// KoLLA M2 annotations to evaluate against

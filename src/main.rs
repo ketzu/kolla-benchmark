@@ -78,6 +78,7 @@ async fn benchmark(config: &Config) -> Result<Run> {
         key,
         config.url.clone(),
         model.clone(),
+        config.system.clone(),
         config.prompt.clone(),
     );
     let total = challenges.len();
@@ -112,6 +113,7 @@ async fn benchmark(config: &Config) -> Result<Run> {
     let provenance = Provenance::new(
         model,
         config.url.to_string(),
+        config.system.clone(),
         config.prompt.clone(),
         dataset,
     );

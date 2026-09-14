@@ -83,19 +83,27 @@ pub struct Api {
     api_key: String,
     base: Url,
     model: String,
+    system: Option<String>,
     prompt: String,
     client: Client,
 }
 
 impl Api {
-    pub fn new(api_key: String, base: Url, model: String, prompt: String) -> Api {
-        Self::with_timeout(api_key, base, model, prompt, REQUEST_TIMEOUT)
+    pub fn new(
+        api_key: String,
+        base: Url,
+        model: String,
+        system: Option<String>,
+        prompt: String,
+    ) -> Api {
+        Self::with_timeout(api_key, base, model, system, prompt, REQUEST_TIMEOUT)
     }
 
     fn with_timeout(
         api_key: String,
         base: Url,
         model: String,
+        system: Option<String>,
         prompt: String,
         timeout: Duration,
     ) -> Api {
@@ -103,6 +111,7 @@ impl Api {
             api_key,
             base,
             model,
+            system,
             prompt,
             client: Client::builder()
                 .timeout(timeout)
@@ -133,14 +142,20 @@ impl Api {
         response.json().await.map_err(ApiError::decode)
     }
 
-    /// The whole prompt goes out as a single user message, ending in the answer cue.
+    /// The optional system prompt goes first, verbatim; the user message carries the sentence.
+    /// Without a system prompt no system message is sent at all, not even an empty one.
     fn request(&self, challenge: &str) -> Request {
+        let system = self.system.iter().map(|system| Message {
+            role: "system".into(),
+            content: Some(system.clone()),
+        });
+        let user = Message {
+            role: "user".into(),
+            content: Some(self.prompt.replace(SENTENCE_PLACEHOLDER, challenge)),
+        };
         Request {
             model: self.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: Some(self.prompt.replace(SENTENCE_PLACEHOLDER, challenge)),
-            }],
+            messages: system.chain(std::iter::once(user)).collect(),
         }
     }
 
@@ -248,6 +263,7 @@ mod tests {
             "test-key".into(),
             Url::parse("http://localhost").unwrap(),
             "test-model".into(),
+            None,
             DEFAULT_PROMPT.into(),
         );
 
@@ -266,6 +282,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sends_the_system_prompt_first_and_the_sentence_as_user_message() {
+        let api = Api::new(
+            "test-key".into(),
+            Url::parse("http://localhost").unwrap(),
+            "test-model".into(),
+            Some("Correct the Korean sentence.".into()),
+            "{sentence}".into(),
+        );
+
+        let request = api.request("저는 학교에 갔어요.");
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, "system");
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some("Correct the Korean sentence.")
+        );
+        assert_eq!(request.messages[1].role, "user");
+        assert_eq!(
+            request.messages[1].content.as_deref(),
+            Some("저는 학교에 갔어요.")
+        );
+    }
+
     #[tokio::test]
     async fn send_times_out_when_the_endpoint_never_responds() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -278,6 +319,7 @@ mod tests {
             "test-key".into(),
             Url::parse(&format!("http://{address}")).unwrap(),
             "test-model".into(),
+            None,
             DEFAULT_PROMPT.into(),
             Duration::from_millis(50),
         );
