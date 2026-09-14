@@ -1,32 +1,38 @@
 [
   {
+    "name": "extended",
     "user": "Correct the following korean sentence. Only correct actual errors. Reply with only the corrected sentence. {sentence}"
   },
   {
+    "name": "long",
     "user": "You are correcting Korean sentences written by learners of Korean.\nCorrect grammatical, lexical, spacing, spelling, and word-order errors while preserving the learner's intended meaning as closely as possible.\nMake only the changes necessary to produce a grammatically correct and natural Korean sentence. Do not rewrite the sentence merely to improve style.\nIf the sentence is already acceptable, return it unchanged.\nReturn only the corrected Korean sentence, with no explanation or additional text.\nSentence: {sentence}"
   },
   {
+    "name": "korean",
     "user": "아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.\n단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.\n문장: {sentence}\n교정문:"
   },
   {
+    "name": "simple",
     "user": "Correct the Korean sentence. Reply with the corrected sentence only. {sentence}"
   },
   {
+    "name": "extended",
     "system": "Correct the following korean sentence. Only correct actual errors. Reply with only the corrected sentence.",
     "user": "{sentence}"
   },
   {
+    "name": "long",
     "system": "You are correcting Korean sentences written by learners of Korean.\nCorrect grammatical, lexical, spacing, spelling, and word-order errors while preserving the learner's intended meaning as closely as possible.\nMake only the changes necessary to produce a grammatically correct and natural Korean sentence. Do not rewrite the sentence merely to improve style.\nIf the sentence is already acceptable, return it unchanged.\nReturn only the corrected Korean sentence, with no explanation or additional text.",
     "user": "{sentence}"
   },
   {
+    "name": "korean",
     "system": "아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.\n단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.",
     "user": "{sentence}"
   },
   {
+    "name": "simple",
     "system": "Correct the Korean sentence. Reply with the corrected sentence only.",
     "user": "{sentence}"
   }
 ]
-
-

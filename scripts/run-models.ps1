@@ -16,8 +16,8 @@ Everything but --models and --prompts is passed on to the benchmark unchanged. O
 does not stop the others. Runs land in results\<timestamp>\<model>.json.
 
 With --prompts every model runs against every prompt of a JSON file: an array of objects with a
-"user" template containing {sentence} and an optional "system" prompt. Prompts are numbered from 1
-in file order, and runs land in results\<timestamp>\<model>\p<number>.json.
+"user" template containing {sentence}, an optional "system" prompt and an optional "name". Prompts
+are numbered from 1 in file order, and runs land in results\<timestamp>\<model>\p<number>.json.
 #>
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -91,11 +91,12 @@ if ($PromptFile)
     {
         $valid = $valid -and $prompt -is [pscustomobject] -and
                 $prompt.user -is [string] -and $prompt.user.Contains('{sentence}') -and
-                ($null -eq $prompt.PSObject.Properties['system'] -or $prompt.system -is [string])
+                ($null -eq $prompt.PSObject.Properties['system'] -or $prompt.system -is [string]) -and
+                ($null -eq $prompt.PSObject.Properties['name'] -or $prompt.name -is [string])
     }
     if (-not $valid)
     {
-        Write-Error "$PromptFile must be a non-empty array of {`"user`": ..., `"system`"?: ...} with {sentence} in every user template"
+        Write-Error "$PromptFile must be a non-empty array of {`"name`"?: ..., `"user`": ..., `"system`"?: ...} with {sentence} in every user template"
         exit 1
     }
 }
@@ -131,13 +132,16 @@ $runs = foreach ($model in $ids)
     }
     for ($n = 0; $n -lt $prompts.Count; $n++) {
         $flags = @('--prompt', $prompts[$n].user)
+        $type = 'user'
         if ($null -ne $prompts[$n].system)
         {
             $flags = @('--system', $prompts[$n].system) + $flags
+            $type = 'system+user'
         }
+        $name = if ($prompts[$n].name) { $prompts[$n].name } else { 'unnamed' }
         [pscustomobject]@{
             Model = $model
-            Prompt = "p$( $n + 1 )"
+            Prompt = "p$( $n + 1 ) $name/$type"
             Flags = $flags
             Result = Join-Path $batch (Get-SafeName $model) "p$( $n + 1 ).json"
         }

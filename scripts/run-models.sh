@@ -9,8 +9,9 @@
 # does not stop the others. Runs land in results/<timestamp>/<model>.json.
 #
 # With --prompts every model runs against every prompt of a JSON file: an array of objects with a
-# "user" template containing {sentence} and an optional "system" prompt. Prompts are numbered from
-# 1 in file order, and runs land in results/<timestamp>/<model>/p<number>.json. This needs jq.
+# "user" template containing {sentence}, an optional "system" prompt and an optional "name". Prompts
+# are numbered from 1 in file order, and runs land in results/<timestamp>/<model>/p<number>.json.
+# This needs jq.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -70,9 +71,10 @@ if [ -n "$prompts_file" ]; then
     if ! jq -e 'type == "array" and length > 0 and all(.[];
             type == "object"
             and (.user | type) == "string" and (.user | contains("{sentence}"))
-            and ((has("system") | not) or (.system | type) == "string"))' \
+            and ((has("system") | not) or (.system | type) == "string")
+            and ((has("name") | not) or (.name | type) == "string"))' \
         "$prompts_file" >/dev/null; then
-        echo "$prompts_file must be a non-empty array of {\"user\": ..., \"system\"?: ...} with {sentence} in every user template" >&2
+        echo "$prompts_file must be a non-empty array of {\"name\"?: ..., \"user\": ..., \"system\"?: ...} with {sentence} in every user template" >&2
         exit 1
     fi
     prompt_count=$(jq 'length' "$prompts_file" | tr -d '\r')
@@ -129,7 +131,14 @@ result_of() {
 }
 
 label_of() {
-    if [ "$2" -eq 0 ]; then printf '%s' "$1"; else printf '%s, p%s' "$1" "$2"; fi
+    if [ "$2" -eq 0 ]; then printf '%s' "$1"; else printf '%s, %s' "$1" "$(prompt_of "$2")"; fi
+}
+
+# Prompt number $1 with its name and message layout, e.g. "p3 korean/user".
+prompt_of() {
+    jq -j --argjson n "$(($1 - 1))" \
+        '.[$n] | "p\($n + 1) \(.name // "unnamed")/\(if has("system") then "system+user" else "user" end)"' \
+        "$prompts_file" | tr -d '\r'
 }
 
 for i in "${!run_models[@]}"; do
@@ -150,7 +159,7 @@ value() { sed -n "s/.*\"$2\": \([0-9.eE+-]*\).*/\1/p" "$1" | head -1; }
 # The leading columns of a summary line; the prompt column only for a prompt matrix.
 columns() {
     if [ -n "$prompts_file" ]; then
-        printf '%-45s %-6s ' "$1" "$2"
+        printf '%-45s %-24s ' "$1" "$2"
     else
         printf '%-45s ' "$1"
     fi
@@ -163,7 +172,7 @@ for i in "${!run_models[@]}"; do
     model=${run_models[i]}
     prompt=${run_prompts[i]}
     result=$(result_of "$model" "$prompt")
-    columns "$model" "p$prompt"
+    if [ "$prompt" -gt 0 ]; then columns "$model" "$(prompt_of "$prompt")"; else columns "$model" ""; fi
     if [ -f "$result" ]; then
         printf '%9.4f %9.4f %9.4f\n' \
             "$(value "$result" precision)" "$(value "$result" recall)" "$(value "$result" f05)"
