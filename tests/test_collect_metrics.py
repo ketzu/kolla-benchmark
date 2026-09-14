@@ -4,13 +4,91 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.collect_metrics import COLUMNS, collect_rows, write_report
+from scripts.collect_metrics import (
+    COLUMNS,
+    DETAIL_COLUMNS,
+    collect_details,
+    collect_rows,
+    write_report,
+)
+
+
+def scored(fp, fn):
+    return {"score": {"counts": {"tp": 1, "fp": fp, "fn": fn}}}
 
 
 class CollectMetricsTests(unittest.TestCase):
     def write_json(self, path, payload):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_describes_runs_from_results_and_model_info(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            results_dir = root / "results"
+            model_info = root / "model-info.csv"
+            model_info.write_text(
+                "model,display_name,company,params,quantization,file_bytes\n"
+                "local/known,Known Model,Known Inc,3B,Q8_0,1234\n",
+                encoding="utf-8",
+            )
+            self.write_json(
+                results_dir / "batch-a" / "known.json",
+                {
+                    "provenance": {
+                        "model": "local/known",
+                        "endpoint": "http://localhost:1234/v1",
+                        "started": "2026-09-11T15:01:34Z",
+                        "rescored": None,
+                    },
+                    "results": [
+                        scored(0, 0),
+                        scored(0, 0),
+                        scored(2, 0),
+                        scored(0, 1),
+                        scored(1, 1),
+                    ],
+                },
+            )
+            self.write_json(
+                results_dir / "batch-b" / "unknown.json",
+                {
+                    "provenance": {
+                        "model": "provider/unknown",
+                        "endpoint": "https://openrouter.ai/api/v1",
+                        "started": "2026-09-12T06:07:46Z",
+                        "rescored": "2026-09-12T09:48:53Z",
+                    },
+                    "results": [],
+                },
+            )
+
+            known, unknown = collect_details(results_dir, model_info)
+
+            self.assertEqual(
+                known,
+                {
+                    "model": "local/known",
+                    "display_name": "Known Model",
+                    "company": "Known Inc",
+                    "provider": "Local",
+                    "endpoint": "http://localhost:1234/v1",
+                    "started_at": "2026-09-11T15:01:34Z",
+                    "rescored_at": "",
+                    "perfect": 2,
+                    "over_corrected_only": 1,
+                    "under_corrected_only": 1,
+                    "mixed_error": 1,
+                    "params": "3B",
+                    "quantization": "Q8_0",
+                    "file_bytes": "1234",
+                },
+            )
+            self.assertEqual(unknown["provider"], "OpenRouter")
+            self.assertEqual(unknown["rescored_at"], "2026-09-12T09:48:53Z")
+            for column in ["display_name", "company", "params", "quantization", "file_bytes"]:
+                self.assertEqual(unknown[column], "")
+            self.assertEqual(set(known), set(DETAIL_COLUMNS))
 
     def test_collects_and_flattens_every_nested_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:

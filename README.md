@@ -49,8 +49,11 @@ To aggregate all JSON result files into CSV:
 uv run --no-project python ./scripts/collect_metrics.py
 ```
 
-The aggregation script recursively scans `results/`, reads `results/cost.csv`, and writes
-`results/metrics.csv`.
+The aggregation script recursively scans `results/`, reads `results/cost.csv` and
+`scripts/model-info.csv`, and writes `results/metrics.csv` and `results/run-details.csv`.
+Both files are the inputs of the benchmark presentation page. Display name, company, and the
+weights of local models cannot be read from a run, add them to `scripts/model-info.csv` for
+every new model; models without an entry are written with those columns left empty.
 
 Full command usage:
 
