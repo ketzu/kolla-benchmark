@@ -65,44 +65,7 @@ uv run --no-project python ./scripts/collect_metrics.py
 ```
 
 The aggregation script recursively scans `results/`, reads `results/cost.csv`, and writes
-`results/metrics.csv` with one row per run, and `results/metrics_by_prompt.csv` with the F0.5
-of every model (rows) for every prompt variant (columns; the latest run wins when a model ran a
-variant twice).
-
-Every run is labelled along two axes. `prompt_name` is the `name` of the entry in
-[scripts/prompts.json](scripts/prompts.json) whose system prompt and user template the run sent
-(`custom` when none matches), so renaming a prompt there relabels old runs too. `prompt_type` is
-`user` when the prompt went out as a single user message and `system+user` when a system prompt
-came first. Runs written before the prompt became a template sent it as the system message and
-are labelled accordingly.
-
-## Prompt matrix
-
-[scripts/prompts.json](scripts/prompts.json) holds four prompt styles, each as a single user
-message and as a system prompt followed by the bare sentence:
-
-| Name | Prompt |
-|---|---|
-| `simple` | Correct the Korean sentence. Reply with the corrected sentence only. |
-| `extended` | `simple`, but only correct actual errors. |
-| `long` | Multi-line instructions about learner errors, meaning preservation and style. |
-| `korean` | The Korean default prompt. |
-
-```powershell
-scripts\run-models.ps1 --models scripts\local.txt --prompts scripts\prompts.json --limit 0
-```
-
-## Concurrency
-
-`--concurrency` requests are kept in flight for as long as sentences remain: the moment any
-request finishes the next one starts, even when an earlier sentence is still waiting on a slow
-answer. Answers are scored only once all requests are done, so scoring never delays the network,
-and are written in corpus order. A request waiting out a retry backoff keeps its slot, so an
-endpoint that throttles sees fewer requests; the progress bar counts those as backing off.
-
-For LM Studio, set `--concurrency` to the number of parallel requests the loaded model is
-configured for. Requests beyond that wait in LM Studio's queue, and that waiting counts towards
-the 120 second request timeout.
+`results/metrics.csv`.
 
 Full command usage:
 
@@ -124,6 +87,49 @@ Options:
   -h, --help                       Print help
   -V, --version                    Print version
 ```
+
+## Concurrency
+
+`--concurrency` requests are kept in flight for as long as sentences remain: the moment any
+request finishes the next one starts, even when an earlier sentence is still waiting on a slow
+answer. Answers are scored only once all requests are done, so scoring never delays the network,
+and are written in corpus order. A request waiting out a retry backoff keeps its slot, so an
+endpoint that throttles sees fewer requests; the progress bar counts those as backing off.
+
+For LM Studio, set `--concurrency` to the number of parallel requests the loaded model is
+configured for. Requests beyond that wait in LM Studio's queue, and that waiting counts towards
+the 120 second request timeout.
+
+## Multi-prompt experiment
+
+Separate from the primary benchmark, every model can be run against every prompt of
+[scripts/prompts.json](scripts/prompts.json): four prompt styles, each as a single user message
+and as a system prompt followed by the bare sentence.
+
+| Name | Prompt |
+|---|---|
+| `simple` | Correct the Korean sentence. Reply with the corrected sentence only. |
+| `extended` | `simple`, but only correct actual errors. |
+| `long` | Multi-line instructions about learner errors, meaning preservation and style. |
+| `korean` | The Korean default prompt. |
+
+```powershell
+scripts\run-models.ps1 --models scripts\local.txt --prompts scripts\prompts.json --limit 0
+```
+
+Its runs are collected with their own script:
+
+```bash
+uv run --no-project python ./scripts/collect_prompt_metrics.py --results-dir multiprompt-results
+```
+
+It writes `prompt-metrics.csv`, one row per run, and `prompt-matrix.csv`, the F0.5 of every model
+(rows) for every prompt variant (columns; the latest run wins when a model ran a variant twice),
+into the results directory. Every run is labelled along two axes. `prompt_name` is the `name` of
+the entry in `scripts/prompts.json` whose system prompt and user template the run sent (`custom`
+when none matches), so renaming a prompt there relabels old runs too. `prompt_type` is `user` when
+the prompt went out as a single user message and `system+user` when a system prompt came first.
+There is no cost column: the cost file holds one total per model, which cannot be split by prompt.
 
 
 ## Scoring
