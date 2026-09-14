@@ -27,6 +27,8 @@ target
 .env
 data/*.csv
 results/
+multiprompt-results/
+other-results/
 pre-rescore/
 **/*.pyc
 **/__pycache__/
