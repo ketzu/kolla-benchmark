@@ -11,6 +11,9 @@ pub const DEFAULT_PROMPT: &str = "아래 한국어 문장에서 틀린 부분만
 단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.\n\
 문장: {sentence}\n\
 교정문:";
+/// The `extended` prompt of `scripts/prompts.json`, the default of an iterated run.
+pub const EXTENDED_PROMPT: &str = "Correct the following korean sentence. Only correct actual errors. \
+Reply with only the corrected sentence. {sentence}";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// An API failure with enough metadata to decide whether retrying is safe.
@@ -220,8 +223,8 @@ fn parse_retry_after(value: &HeaderValue) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::HeaderValue;
     use reqwest::StatusCode;
+    use reqwest::header::HeaderValue;
     use std::time::{Duration, SystemTime};
 
     #[test]

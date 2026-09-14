@@ -11,9 +11,13 @@ $env:API_KEY = "..."; scripts\run-models.ps1 --models other-list.txt --limit 0
 .EXAMPLE
 $env:API_KEY = "..."; scripts\run-models.ps1 --prompts scripts\prompts.json --limit 100
 
+.EXAMPLE
+$env:API_KEY = "..."; scripts\run-models.ps1 --results-dir iterate-results --iterate --limit 100
+
 .DESCRIPTION
-Everything but --models and --prompts is passed on to the benchmark unchanged. One run failing
-does not stop the others. Runs land in results\<timestamp>\<model>.json.
+Everything but --models, --prompts and --results-dir is passed on to the benchmark unchanged. One
+run failing does not stop the others. Runs land in results\<timestamp>\<model>.json, or below the
+directory given with --results-dir.
 
 With --prompts every model runs against every prompt of a JSON file: an array of objects with a
 "user" template containing {sentence}, an optional "system" prompt and an optional "name". Prompts
@@ -32,10 +36,11 @@ if (-not $env:API_KEY)
     exit 1
 }
 
-# Read out --models and --prompts, pass everything else on. Done by hand because a declared
-# parameter would swallow the first benchmark flag as a positional argument.
+# Read out --models, --prompts and --results-dir, pass everything else on. Done by hand because a
+# declared parameter would swallow the first benchmark flag as a positional argument.
 $Models = Join-Path $PSScriptRoot 'models.txt'
 $PromptFile = $null
+$ResultsDir = 'results'
 $forward = @()
 for ($i = 0; $i -lt $Rest.Count; $i++) {
     if ($Rest[$i] -in '--models', '-Models')
@@ -52,6 +57,14 @@ for ($i = 0; $i -lt $Rest.Count; $i++) {
         if (-not $PromptFile)
         {
             Write-Error "--prompts needs a file"; exit 1
+        }
+    }
+    elseif ($Rest[$i] -in '--results-dir', '-ResultsDir')
+    {
+        $ResultsDir = $Rest[++$i]
+        if (-not $ResultsDir)
+        {
+            Write-Error "--results-dir needs a directory"; exit 1
         }
     }
     else
@@ -108,7 +121,7 @@ if ($PromptFile)
 #}
 $binary = Join-Path 'target' 'release' 'kolla-benchmark.exe'
 
-$batch = Join-Path 'results' (Get-Date -Format 'yyyyMMdd-HHmmss')
+$batch = Join-Path $ResultsDir (Get-Date -Format 'yyyyMMdd-HHmmss')
 New-Item -ItemType Directory -Force -Path $batch | Out-Null
 
 # A model name stripped of anything a path would not like.

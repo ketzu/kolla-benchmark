@@ -28,6 +28,7 @@ target
 data/*.csv
 results/
 multiprompt-results/
+iterate-results/
 other-results/
 pre-rescore/
 **/*.pyc

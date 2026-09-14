@@ -85,11 +85,13 @@ Options:
   -m, --model <MODEL>              Model to evaluate
   -u, --url <URL>                  Base URL for OpenAI compatible request [default: https://openrouter.ai/api/v1]
       --system <SYSTEM>            System prompt sent before the user message; no system message is sent without it
-      --prompt <PROMPT>            User prompt template; {sentence} is replaced by the challenge sentence [default: "아래 한국어 문장에서 틀린 부분만 수정하고, 교정 문장 한 줄만 출력하라.\n단, 문장이 이미 문법적으로 올바르면 원문을 그대로 출력하라.\n문장: {sentence}\n교정문:"]
+      --prompt <PROMPT>            User prompt template; {sentence} is replaced by the challenge sentence [default: the Korean prompt, or the extended prompt with --iterate]
   -d, --data <DATA>                KoLLA M2 annotations to evaluate against [default: data/KoLLA_multi-refs.m2]
   -l, --limit <LIMIT>              Sentences to evaluate; 0 runs the whole corpus (that costs real money) [default: 25]
   -c, --concurrency <CONCURRENCY>  Requests in flight at the same time [default: 10]
-  -o, --output <OUTPUT>            Where to write the run; defaults to results/<model>-<timestamp>.json
+      --iterate                    Send every answer back as the sentence to correct until the model returns it unchanged
+      --max-iterations <N>         Requests per sentence before an iterated sentence stops without settling [default: 10]
+  -o, --output <OUTPUT>            Where to write the run; defaults to results/<model>-<timestamp>.json, or to iterate-results/ with --iterate
       --rescore <RESCORE>          Score a previously written run again instead of calling the API
       --baseline                   Score the corpus against itself instead of calling the API
   -h, --help                       Print help
@@ -139,6 +141,32 @@ when none matches), so renaming a prompt there relabels old runs too. `prompt_ty
 the prompt went out as a single user message and `system+user` when a system prompt came first.
 There is no cost column: the cost file holds one total per model, which cannot be split by prompt.
 
+
+## Iterated correction experiment
+
+`--iterate` tests whether a model settles on its own correction. Each sentence is first sent as
+usual. The answer is then sent back in a fresh single-turn request, in place of the sentence, until
+an answer tokenizes the same as the text it was sent: the model considers it correct. A model that
+returns the original unchanged therefore takes one request. `--max-iterations` (default 10) caps
+the requests per sentence; a sentence that reaches it is scored on its last answer and counted as
+not converged. The default prompt of this experiment is `extended`, as a single user message;
+`--prompt` and `--system` still override it.
+
+```powershell
+scripts\run-models.ps1 --models scripts\local.txt --results-dir iterate-results --iterate --limit 0
+```
+
+Every answer is recorded in the result's `rounds`, but only the last one is scored. Each request is
+retried like a normal one; a request that still fails fails the whole sentence, whose failure
+entry keeps the rounds received before it. A sentence keeps its concurrency slot for its whole
+chain. The run's `summary.requests` holds how many sentences converged and the requests per scored
+sentence: total, p25, median, mean, p75, p90 and max, percentiles interpolated linearly.
+
+Its runs are collected with their own script, which writes `iterate-metrics.csv`, one row per run:
+
+```bash
+uv run --no-project python ./scripts/collect_iterate_metrics.py --results-dir iterate-results
+```
 
 ## Scoring
 

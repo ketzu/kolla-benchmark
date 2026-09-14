@@ -1,4 +1,4 @@
-use crate::analysis::{Data, Dataset, Failure, Provenance, Run};
+use crate::analysis::{Data, Dataset, Failure, Provenance, Round, Run};
 use crate::config::Config;
 use crate::loader::{Base, load_m2};
 use crate::openai::{Api, Response};
@@ -73,25 +73,54 @@ async fn benchmark(config: &Config) -> Result<Run> {
         dataset.sentences,
         config.url
     );
+    if let Some(max_iterations) = config.iterations() {
+        println!("Sending every answer back, up to {max_iterations} requests per sentence");
+    }
 
+    let prompt = config.prompt();
     let api = Api::new(
         key,
         config.url.clone(),
         model.clone(),
         config.system.clone(),
-        config.prompt.clone(),
+        prompt.clone(),
     );
     let total = challenges.len();
     let breaker = CircuitBreaker::default();
     let progress = Progress::new(total, &model);
-    let answers = saturate(
-        challenges
-            .iter()
-            .map(|challenge| challenge.original.as_str()),
-        config.concurrency,
-        |index, original| ask(&api, original, index, total, &breaker, &progress),
-    )
-    .await;
+    let (api, breaker, progress) = (&api, &breaker, &progress);
+    let originals = challenges
+        .iter()
+        .map(|challenge| challenge.original.as_str());
+    let answers = match config.iterations() {
+        None => {
+            saturate(
+                originals,
+                config.concurrency,
+                |index, original| async move {
+                    let _worker = progress.start();
+                    ask(api, original.to_owned(), index, total, breaker, progress)
+                        .await
+                        .map(|result| result.map(Answer::Once))
+                },
+            )
+            .await
+        }
+        Some(max_iterations) => {
+            saturate(
+                originals,
+                config.concurrency,
+                |index, original| async move {
+                    let _worker = progress.start();
+                    iterate(original, max_iterations, |sentence| {
+                        ask(api, sentence, index, total, breaker, progress)
+                    })
+                    .await
+                },
+            )
+            .await
+        }
+    };
     progress.finish(breaker.is_open());
 
     // Scored only once every request is done, so that scoring never holds up the network.
@@ -102,9 +131,15 @@ async fn benchmark(config: &Config) -> Result<Run> {
             // Never answered: the run stopped first.
             None => {}
             Some(Err(failure)) => failures.push(failure),
-            Some(Ok(response)) => {
+            Some(Ok(answer)) => {
                 let original = challenge.original.clone();
-                match Data::new(challenge, response) {
+                let data = match answer {
+                    Answer::Once(response) => Data::new(challenge, response),
+                    Answer::Iterated { rounds, converged } => {
+                        Ok(Data::iterated(challenge, rounds, converged))
+                    }
+                };
+                match data {
                     Ok(data) => results.push(data),
                     Err(error) => {
                         eprintln!(
@@ -124,10 +159,62 @@ async fn benchmark(config: &Config) -> Result<Run> {
         model,
         config.url.to_string(),
         config.system.clone(),
-        config.prompt.clone(),
+        prompt,
+        config.iterations(),
         dataset,
     );
     Ok(Run::new(provenance, results, failures))
+}
+
+/// What came back for one sentence, before it is scored.
+#[derive(Debug)]
+enum Answer {
+    Once(Response),
+    Iterated { rounds: Vec<Round>, converged: bool },
+}
+
+/// Send the sentence, then every answer back in its place, until an answer tokenizes the same as
+/// the text it was sent or `max_iterations` requests were made. A request that fails fails the
+/// whole sentence, which keeps the rounds that came back before it.
+async fn iterate<Fut>(
+    original: &str,
+    max_iterations: usize,
+    mut ask: impl FnMut(String) -> Fut,
+) -> Outcome<Result<Answer, Failure>>
+where
+    Fut: Future<Output = Outcome<Result<Response, Failure>>>,
+{
+    let mut rounds = Vec::new();
+    let mut sent = original.to_owned();
+    loop {
+        let Outcome { result, stop } = ask(sent.clone()).await;
+        let round = result
+            .map_err(|failure| failure.error)
+            .and_then(|response| Round::of(response).map_err(|error| error.to_string()));
+        let round = match round {
+            Ok(round) => round,
+            Err(error) => {
+                return Outcome {
+                    result: Err(Failure {
+                        original: original.to_owned(),
+                        error,
+                        rounds,
+                    }),
+                    stop,
+                };
+            }
+        };
+
+        let converged = scorer::tokenize(&round.answer) == scorer::tokenize(&sent);
+        sent = round.answer.clone();
+        rounds.push(round);
+        if converged || rounds.len() >= max_iterations {
+            return Outcome {
+                result: Ok(Answer::Iterated { rounds, converged }),
+                stop,
+            };
+        }
+    }
 }
 
 /// Run `work` on every item with `concurrency` items in flight for as long as there are items
@@ -160,16 +247,15 @@ where
     answers
 }
 
-/// One sentence, retried a few times; repeated retry exhaustion stops the run.
+/// One request for a sentence, retried a few times; repeated retry exhaustion stops the run.
 async fn ask(
     api: &Api,
-    original: &str,
+    original: String,
     index: usize,
     total: usize,
     breaker: &CircuitBreaker,
     progress: &Progress,
 ) -> Outcome<Result<Response, Failure>> {
-    let _worker = progress.start();
     let mut retries = 0;
     loop {
         if breaker.is_open() {
@@ -179,10 +265,10 @@ async fn ask(
                 total
             ));
             return Outcome {
-                result: Err(Failure {
-                    original: original.to_owned(),
-                    error: "benchmark stopped after repeated retry-exhausted failures".into(),
-                }),
+                result: Err(failure(
+                    &original,
+                    "benchmark stopped after repeated retry-exhausted failures",
+                )),
                 stop: true,
             };
         }
@@ -205,7 +291,7 @@ async fn ask(
                     error
                 ));
                 return Outcome {
-                    result: Err(failure(original, error)),
+                    result: Err(failure(&original, error)),
                     stop: false,
                 };
             }
@@ -225,7 +311,7 @@ async fn ask(
                     ));
                 }
                 return Outcome {
-                    result: Err(failure(original, error)),
+                    result: Err(failure(&original, error)),
                     stop: opened_now,
                 };
             }
@@ -255,12 +341,22 @@ fn failure(original: &str, error: impl std::fmt::Display) -> Failure {
     Failure {
         original: original.to_owned(),
         error: error.to_string(),
+        rounds: Vec::new(),
     }
 }
 
 struct Outcome<T> {
     result: T,
     stop: bool,
+}
+
+impl<T> Outcome<T> {
+    fn map<U>(self, map: impl FnOnce(T) -> U) -> Outcome<U> {
+        Outcome {
+            result: map(self.result),
+            stop: self.stop,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -570,5 +666,97 @@ mod tests {
         .await;
 
         assert_eq!(answers, vec![Some(0), Some(1), Some(2), None, None]);
+    }
+
+    fn reply(answer: &str) -> Outcome<Result<Response, Failure>> {
+        done(Ok(Response {
+            choices: vec![crate::openai::Choice {
+                message: crate::openai::Message {
+                    role: "assistant".into(),
+                    content: Some(answer.into()),
+                },
+            }],
+            usage: None,
+        }))
+    }
+
+    /// Iterate `original` against answers given in order, returning what was sent too.
+    async fn iterate_over(
+        original: &str,
+        max_iterations: usize,
+        replies: Vec<Outcome<Result<Response, Failure>>>,
+    ) -> (Outcome<Result<Answer, Failure>>, Vec<String>) {
+        let mut sent = Vec::new();
+        let mut replies = replies.into_iter();
+        let outcome = iterate(original, max_iterations, |sentence| {
+            sent.push(sentence);
+            let reply = replies.next().expect("asked more often than expected");
+            async move { reply }
+        })
+        .await;
+        (outcome, sent)
+    }
+
+    fn answers(rounds: &[Round]) -> Vec<&str> {
+        rounds.iter().map(|round| round.answer.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn iterate_stops_when_the_first_answer_is_the_sentence_unchanged() {
+        // Only the space before the full stop differs, which tokenizes away.
+        let (outcome, sent) = iterate_over(
+            "우리는 배가 고펐습니다 .",
+            10,
+            vec![reply("우리는 배가 고펐습니다.")],
+        )
+        .await;
+
+        let Ok(Answer::Iterated { rounds, converged }) = outcome.result else {
+            panic!("expected an iterated answer");
+        };
+        assert!(converged);
+        assert_eq!(answers(&rounds), ["우리는 배가 고펐습니다."]);
+        assert_eq!(sent, ["우리는 배가 고펐습니다 ."]);
+    }
+
+    #[tokio::test]
+    async fn iterate_sends_every_answer_back_until_one_repeats() {
+        let (outcome, sent) = iterate_over("a", 10, vec![reply("b"), reply("c"), reply("c")]).await;
+
+        let Ok(Answer::Iterated { rounds, converged }) = outcome.result else {
+            panic!("expected an iterated answer");
+        };
+        assert!(converged);
+        assert_eq!(answers(&rounds), ["b", "c", "c"]);
+        assert_eq!(sent, ["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn iterate_gives_up_after_max_iterations() {
+        let (outcome, sent) = iterate_over("a", 2, vec![reply("b"), reply("a")]).await;
+
+        let Ok(Answer::Iterated { rounds, converged }) = outcome.result else {
+            panic!("expected an iterated answer");
+        };
+        assert!(!converged);
+        assert_eq!(answers(&rounds), ["b", "a"]);
+        assert_eq!(sent.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_round_fails_the_sentence_and_keeps_the_rounds_before_it() {
+        let failed = Outcome {
+            result: Err(failure("b", "boom")),
+            stop: true,
+        };
+        let (outcome, _) = iterate_over("a", 10, vec![reply("b"), failed]).await;
+
+        assert!(outcome.stop);
+        let Err(failure) = outcome.result else {
+            panic!("expected a failure");
+        };
+        assert_eq!(failure.original, "a");
+        assert_eq!(failure.error, "boom");
+        assert_eq!(answers(&failure.rounds), ["b"]);
     }
 }

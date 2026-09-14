@@ -4,9 +4,11 @@
 #   API_KEY=... scripts/run-models.sh --limit 100
 #   API_KEY=... scripts/run-models.sh --models other-list.txt --limit 0
 #   API_KEY=... scripts/run-models.sh --prompts scripts/prompts.json --limit 100
+#   API_KEY=... scripts/run-models.sh --results-dir iterate-results --iterate --limit 100
 #
-# Everything but --models and --prompts is passed on to the benchmark unchanged. One run failing
-# does not stop the others. Runs land in results/<timestamp>/<model>.json.
+# Everything but --models, --prompts and --results-dir is passed on to the benchmark unchanged. One
+# run failing does not stop the others. Runs land in results/<timestamp>/<model>.json, or below the
+# directory given with --results-dir.
 #
 # With --prompts every model runs against every prompt of a JSON file: an array of objects with a
 # "user" template containing {sentence}, an optional "system" prompt and an optional "name". Prompts
@@ -16,9 +18,11 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Read out --models and --prompts wherever they stand, pass everything else on to the benchmark.
+# Read out --models, --prompts and --results-dir wherever they stand, pass everything else on to
+# the benchmark.
 models_file="scripts/models.txt"
 prompts_file=""
+results_dir="results"
 forward=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -28,6 +32,10 @@ while [ $# -gt 0 ]; do
         ;;
     --prompts)
         prompts_file="${2:?--prompts needs a file}"
+        shift 2
+        ;;
+    --results-dir)
+        results_dir="${2:?--results-dir needs a directory}"
         shift 2
         ;;
     *)
@@ -101,7 +109,7 @@ cargo build --release || exit 1
 binary="target/release/kolla-benchmark"
 [ -f "$binary.exe" ] && binary="$binary.exe"
 
-batch="results/$(date +%Y%m%d-%H%M%S)"
+batch="$results_dir/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$batch"
 
 # Every run as a model and a prompt number; prompt number 0 runs with the flags passed on.

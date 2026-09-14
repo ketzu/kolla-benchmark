@@ -19,20 +19,43 @@ pub struct Data {
     pub answer_tokens: Vec<String>,
     pub score: SentenceScore,
     pub usage: Usage,
+    /// Every answer of an iterated sentence in order, the last one being `answer`; empty when
+    /// the sentence was asked once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rounds: Vec<Round>,
+    /// Whether the last answer of an iterated sentence repeated the text it was sent, rather
+    /// than the sentence running out of requests; none when the sentence was asked once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converged: Option<bool>,
 }
 
 impl Data {
     pub fn new(base: Base, response: Response) -> Result<Data> {
-        let answer = response
-            .choices
-            .into_iter()
-            .next()
-            .context("Missing Choice")?
-            .message
-            .content
-            .context("Missing answer")?;
-        let usage = response.usage.map(Usage::from).unwrap_or_default();
+        let Round { answer, usage } = Round::of(response)?;
+        Ok(Data::scored(base, answer, usage, Vec::new(), None))
+    }
 
+    /// A sentence sent back to the model answer after answer. Only the last answer is scored;
+    /// the usage is that of every round together.
+    pub fn iterated(base: Base, rounds: Vec<Round>, converged: bool) -> Data {
+        let answer = rounds
+            .last()
+            .expect("an iterated sentence has at least one round")
+            .answer
+            .clone();
+        let usage = rounds
+            .iter()
+            .fold(Usage::default(), |sum, round| sum + round.usage);
+        Data::scored(base, answer, usage, rounds, Some(converged))
+    }
+
+    fn scored(
+        base: Base,
+        answer: String,
+        usage: Usage,
+        rounds: Vec<Round>,
+        converged: Option<bool>,
+    ) -> Data {
         let mut data = Data {
             base,
             answer,
@@ -43,9 +66,11 @@ impl Data {
                 edits: Vec::new(),
             },
             usage,
+            rounds,
+            converged,
         };
         data.rescore();
-        Ok(data)
+        data
     }
 
     /// Tokenize the answer and score it again — the only place scoring is applied.
@@ -89,11 +114,48 @@ impl From<crate::openai::Usage> for Usage {
     }
 }
 
+impl std::ops::Add for Usage {
+    type Output = Usage;
+
+    fn add(self, other: Usage) -> Usage {
+        Usage {
+            prompt: self.prompt + other.prompt,
+            result: self.result + other.result,
+            total: self.total + other.total,
+        }
+    }
+}
+
+/// One answer of an iterated sentence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Round {
+    pub answer: String,
+    pub usage: Usage,
+}
+
+impl Round {
+    pub fn of(response: Response) -> Result<Round> {
+        let answer = response
+            .choices
+            .into_iter()
+            .next()
+            .context("Missing Choice")?
+            .message
+            .content
+            .context("Missing answer")?;
+        let usage = response.usage.map(Usage::from).unwrap_or_default();
+        Ok(Round { answer, usage })
+    }
+}
+
 /// A sentence whose request never came back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Failure {
     pub original: String,
     pub error: String,
+    /// The answers an iterated sentence got before the request that failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rounds: Vec<Round>,
 }
 
 /// A complete run: what we did, what came back, and what it scored.
@@ -115,7 +177,7 @@ impl Run {
         for data in &results {
             counts.add(data.score.counts);
         }
-        let summary = Summary::of(&results);
+        let summary = Summary::of(&results, provenance.max_iterations.is_some());
         Run {
             provenance,
             counts,
@@ -141,8 +203,13 @@ impl Run {
         serde_json::from_str(&json).wrap_err_with(|| format!("parsing {}", path.display()))
     }
 
-    /// Default location for a run of this model: `results/<model>-<timestamp>.json`.
+    /// Default location for a run of this model: `results/<model>-<timestamp>.json`, or
+    /// `iterate-results/` for an iterated run.
     pub fn default_output(&self) -> PathBuf {
+        let directory = match self.provenance.max_iterations {
+            Some(_) => "iterate-results",
+            None => "results",
+        };
         let model: String = self
             .provenance
             .model
@@ -154,7 +221,7 @@ impl Run {
                 },
             )
             .collect();
-        PathBuf::from("results").join(format!("{model}-{}.json", self.provenance.started_unix))
+        PathBuf::from(directory).join(format!("{model}-{}.json", self.provenance.started_unix))
     }
 
     /// The human readable report over the whole run.
@@ -209,6 +276,26 @@ impl Run {
             self.summary.prompt_tokens,
             self.summary.completion_tokens,
         );
+        if let (Some(requests), Some(max_iterations)) =
+            (self.summary.requests, self.provenance.max_iterations)
+        {
+            let Requests {
+                converged,
+                total,
+                p25,
+                median,
+                mean,
+                p75,
+                p90,
+                max,
+            } = requests;
+            let _ = write!(
+                report,
+                "converged  {converged} of {scored} sentences settled within {max_iterations} requests\n\
+                 requests   {total} in total; per sentence p25 {p25:.2}, median {median:.2}, \
+                 mean {mean:.2}, p75 {p75:.2}, p90 {p90:.2}, max {max}\n",
+            );
+        }
         report
     }
 }
@@ -223,12 +310,16 @@ pub struct Summary {
     pub unchanged: usize,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// How many requests the sentences of an iterated run took; none when each was asked once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<Requests>,
 }
 
 impl Summary {
-    fn of(results: &[Data]) -> Self {
+    fn of(results: &[Data], iterated: bool) -> Self {
         let mut summary = Summary {
             sentences: results.len(),
+            requests: iterated.then(|| Requests::of(results)),
             ..Summary::default()
         };
         for data in results {
@@ -240,6 +331,54 @@ impl Summary {
             summary.completion_tokens += data.usage.result;
         }
         summary
+    }
+}
+
+/// The requests per scored sentence of an iterated run. Percentiles interpolate linearly
+/// between the two nearest sentences, like numpy's default.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Requests {
+    /// Sentences whose last answer repeated the text it was sent.
+    pub converged: usize,
+    pub total: usize,
+    pub p25: f64,
+    pub median: f64,
+    pub mean: f64,
+    pub p75: f64,
+    pub p90: f64,
+    pub max: usize,
+}
+
+impl Requests {
+    fn of(results: &[Data]) -> Self {
+        let mut counts: Vec<usize> = results.iter().map(|data| data.rounds.len()).collect();
+        counts.sort_unstable();
+        let total = counts.iter().sum();
+        let percentile = |fraction: f64| match counts.len() {
+            0 => 0.0,
+            length => {
+                let rank = fraction * (length - 1) as f64;
+                let low = counts[rank.floor() as usize] as f64;
+                let high = counts[rank.ceil() as usize] as f64;
+                low + (high - low) * rank.fract()
+            }
+        };
+        Requests {
+            converged: results
+                .iter()
+                .filter(|data| data.converged == Some(true))
+                .count(),
+            total,
+            p25: percentile(0.25),
+            median: percentile(0.5),
+            mean: match counts.len() {
+                0 => 0.0,
+                length => total as f64 / length as f64,
+            },
+            p75: percentile(0.75),
+            p90: percentile(0.9),
+            max: counts.last().copied().unwrap_or_default(),
+        }
     }
 }
 
@@ -255,6 +394,9 @@ pub struct Provenance {
     #[serde(default)]
     pub system: Option<String>,
     pub prompt: String,
+    /// The most requests per sentence of an iterated run; none when each sentence was asked once.
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
     pub dataset: Dataset,
     /// When the stored answers were scored again with a newer scorer.
     pub rescored: Option<String>,
@@ -266,6 +408,7 @@ impl Provenance {
         endpoint: String,
         system: Option<String>,
         prompt: String,
+        max_iterations: Option<usize>,
         dataset: Dataset,
     ) -> Self {
         let started_unix = unix_now();
@@ -277,6 +420,7 @@ impl Provenance {
             endpoint,
             system,
             prompt,
+            max_iterations,
             dataset,
             rescored: None,
         }
@@ -494,6 +638,77 @@ A 0 7|||R:TEST|||x y z q r s t|||REQUIRED|||-NONE-|||0
             (1, 0, 0)
         );
         assert_eq!(data.score.edits[0].end, 7);
+    }
+
+    fn round(answer: &str, prompt: u64) -> Round {
+        Round {
+            answer: answer.into(),
+            usage: Usage {
+                prompt,
+                result: 1,
+                total: prompt + 1,
+            },
+        }
+    }
+
+    #[test]
+    fn scores_only_the_last_round_of_an_iterated_sentence() {
+        let base = parse_m2(SAMPLE).unwrap().remove(0);
+        let rounds = vec![
+            round("우리는 배가 고팠다.", 10),
+            round("우리는 배가 고팠습니다.", 20),
+        ];
+
+        let data = Data::iterated(base, rounds, true);
+
+        assert_eq!(data.answer, "우리는 배가 고팠습니다.");
+        assert_eq!(data.score.counts.tp, 1);
+        assert_eq!(data.score.counts.fp, 0);
+        assert_eq!((data.usage.prompt, data.usage.result), (30, 2));
+        assert_eq!(data.converged, Some(true));
+    }
+
+    #[test]
+    fn summarizes_the_requests_of_an_iterated_run() {
+        let base = parse_m2(SAMPLE).unwrap().remove(0);
+        let sentence = |requests: usize, converged: bool| {
+            let rounds = (0..requests).map(|_| round("우리는", 1)).collect();
+            Data::iterated(base.clone(), rounds, converged)
+        };
+        let results = [
+            sentence(4, true),
+            sentence(1, true),
+            sentence(3, false),
+            sentence(2, true),
+        ];
+
+        let requests = Summary::of(&results, true).requests.unwrap();
+
+        let close = |actual: f64, expected: f64| (actual - expected).abs() < 1e-9;
+        assert_eq!(requests.converged, 3);
+        assert_eq!(requests.total, 10);
+        assert_eq!(requests.max, 4);
+        assert!(close(requests.p25, 1.75), "p25 {}", requests.p25);
+        assert!(close(requests.median, 2.5), "median {}", requests.median);
+        assert!(close(requests.mean, 2.5), "mean {}", requests.mean);
+        assert!(close(requests.p75, 3.25), "p75 {}", requests.p75);
+        assert!(close(requests.p90, 3.7), "p90 {}", requests.p90);
+        assert_eq!(Summary::of(&results, false).requests, None);
+        assert_eq!(Summary::of(&[], true).requests, Some(Requests::default()));
+    }
+
+    #[test]
+    fn a_single_request_writes_and_reads_without_rounds() {
+        let data = answered("우리는 배가 고팠습니다.");
+
+        let mut json = serde_json::to_value(&data).unwrap();
+        let object = json.as_object_mut().unwrap();
+        assert!(!object.contains_key("rounds"));
+        assert!(!object.contains_key("converged"));
+
+        let read: Data = serde_json::from_value(json).unwrap();
+        assert!(read.rounds.is_empty());
+        assert_eq!(read.converged, None);
     }
 
     #[test]
