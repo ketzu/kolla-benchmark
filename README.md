@@ -55,6 +55,62 @@ Both files are the inputs of the benchmark presentation page. Display name, comp
 weights of local models cannot be read from a run, add them to `scripts/model-info.csv` for
 every new model; models without an entry are written with those columns left empty.
 
+## Remote runs on vast.ai
+
+Self-hosted models can be benchmarked on a rented [vast.ai](https://vast.ai) GPU. One
+instance is rented per batch. It serves every model of a list with
+[vLLM](https://docs.vllm.ai) one after the other, benchmarks it, uploads the run to an
+S3-compatible bucket as soon as it is done, and destroys itself when the list is done or the
+deadline passes. The local machine can go offline once `launch` returns.
+
+Put the credentials into the environment or `.env` at the repository root:
+
+```
+VAST_API_KEY=...
+S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+S3_BUCKET=...
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_REGION=auto            # optional
+HF_TOKEN=...              # optional, for gated models
+```
+
+The S3 credentials and `HF_TOKEN` are handed to the instance, so prefer a token scoped to
+the bucket. The vast.ai API key stays local; the instance destroys itself with its own
+per-instance key.
+
+Models are listed like [scripts/vllm.txt](scripts/vllm.txt): a Hugging Face repo per line in
+a format vLLM serves natively (BF16, FP8, INT8, AWQ, GPTQ), optionally followed by extra
+`vllm serve` flags. `--max-model-len 16384` is added unless a line sets it, and
+`--tensor-parallel-size` when the instance has more than one GPU.
+
+Reasoning models need the matching `--reasoning-parser` (e.g. `qwen3`, `gemma4`), or vLLM
+returns the think block as part of the answer. The runner asks every model one sentence
+before the benchmark and fails it when the answer contains reasoning markers such as
+`<think>`; a finished run whose answers still contain them is moved to
+`logs/<model>.rejected.json` instead of `results/`.
+
+```bash
+uv run scripts/vast/vast_bench.py launch --models scripts/vllm.txt --gpu 'gpu_ram>=80 num_gpus=1' --max-dph 3 -- --limit 0 --concurrency 32
+uv run scripts/vast/vast_bench.py status
+uv run scripts/vast/vast_bench.py pull --logs
+uv run scripts/vast/vast_bench.py destroy
+```
+
+| Command | Description |
+|---|---|
+| `launch` | Rent the cheapest offer matching `--gpu` (vast.ai filter syntax, `gpu_ram` in GB), `--disk` (200 GB) and `--max-dph`, then start the batch. Offers that do not boot within `--boot-timeout` (30m) are destroyed and the next is tried. `--deadline` (12h) destroys the instance no matter what. Everything after `--` goes to the benchmark. |
+| `status [BATCH]` | Phase, GPU, cost so far, last heartbeat, and the state and F0.5 of every model. |
+| `pull [BATCH]` | Download the runs into `results/<batch>/`; `--logs` also fetches the vLLM and benchmark logs. |
+| `destroy [BATCH]` | Destroy the batch's instance by hand. |
+
+`BATCH` defaults to the latest batch in the bucket. The benchmark is built on the instance
+from the working tree, uncommitted changes to tracked files included. A model that vLLM
+cannot load or that fails the benchmark is marked failed and the batch continues. Every run
+gets a `<model>.vast.json` next to it with GPU, vLLM version, timings, and the GPU cost of
+that run; `collect_metrics.py` reports these runs with provider `Vast.ai` and takes their
+cost from it unless `results/cost.csv` has one.
+
 Full command usage:
 
 ```bash

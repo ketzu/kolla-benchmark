@@ -32,3 +32,4 @@ multiprompt-results/
 pre-rescore/
 **/*.pyc
 **/__pycache__/
+*results/

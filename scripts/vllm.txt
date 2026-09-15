@@ -1,0 +1,5 @@
+# models to benchmark on rented vast.ai GPUs with vLLM, see scripts/vast/vast_bench.py
+# one Hugging Face repo per line, extra `vllm serve` flags after it
+# reasoning models need --reasoning-parser, otherwise the think block is scored as the answer
+Qwen/Qwen3-0.6B --reasoning-parser qwen3
+#Qwen/Qwen3-8B-FP8 --max-model-len 8192

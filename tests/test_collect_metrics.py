@@ -139,6 +139,31 @@ class CollectMetricsTests(unittest.TestCase):
             self.assertEqual(rows[0]["cost"], "1.234567")
             self.assertEqual(rows[1]["cost"], "0")
 
+    def test_reads_vast_sidecars_for_provider_and_cost_without_counting_them_as_runs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            results_dir = root / "results"
+            payload = {
+                "provenance": {"model": "Qwen/remote", "endpoint": "http://vast.local:8000/v1"},
+                "results": [],
+            }
+            self.write_json(results_dir / "batch" / "Qwen_remote.json", payload)
+            self.write_json(results_dir / "batch" / "Qwen_remote.vast.json", {"cost_usd": 0.1})
+            other = {"provenance": {"model": "Qwen/priced", "endpoint": "http://vast.local:8000/v1"}}
+            self.write_json(results_dir / "batch" / "Qwen_priced.json", other)
+            self.write_json(results_dir / "batch" / "Qwen_priced.vast.json", {"cost_usd": 0.2})
+            cost_file = root / "cost.csv"
+            cost_file.write_text("API Key,Model,Value\neval,Qwen/priced,9.5\n", encoding="utf-8")
+
+            rows = collect_rows(results_dir, cost_file)
+            details = collect_details(results_dir, root / "missing.csv")
+
+            self.assertEqual(
+                [(row["model"], row["cost"]) for row in rows],
+                [("Qwen/priced", "9.5"), ("Qwen/remote", "0.1")],
+            )
+            self.assertEqual([row["provider"] for row in details], ["Vast.ai", "Vast.ai"])
+
     def test_writes_requested_columns_in_stable_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "metrics.csv"

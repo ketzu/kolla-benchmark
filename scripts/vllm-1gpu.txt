@@ -1,0 +1,25 @@
+# vLLM batch for one 96 GB Blackwell card (RTX PRO 6000), see scripts/vast/vast_bench.py
+# Reasoning models need --reasoning-parser, otherwise the think block is scored as the answer.
+
+# missing: crashed the local machine
+Qwen/Qwen3.8-27B --reasoning-parser qwen3
+
+# best local model, ran as Q4_K_M in LM Studio; full precision here
+meta-models/Muse-Glimmer-30B --reasoning-parser muse_glimmer
+
+# Gemma 4: 26B-A4B ran as Q4_K_M locally, 31B and 12B never ran
+#google/gemma-4-31B-it --reasoning-parser gemma4
+google/gemma-4-26B-A4B-it --reasoning-parser gemma4
+google/gemma-4-12B-it --reasoning-parser gemma4
+
+# Korean labs
+LGAI-EXAONE/EXAONE-4.5-33B
+kakaocorp/kanana-2-30b-a3b-instruct-2601
+K-intelligence/Midm-2.0-Base-Instruct
+naver-hyperclovax/HyperCLOVAX-SEED-Omni-8B
+
+# open multilingual models not covered yet
+Qwen/Qwen3.6-35B-A3B-FP8 --reasoning-parser qwen3
+#openai/gpt-oss-120b --reasoning-parser openai_gptoss
+# NVFP4 needs a Blackwell card
+nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 --reasoning-parser nemotron_v3

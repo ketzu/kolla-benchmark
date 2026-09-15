@@ -1,0 +1,12 @@
+# vLLM batch for four 96 GB cards (384 GB), see scripts/vast/vast_bench.py
+# Weights are 120-300 GB each, so most of the time goes into downloading them.
+
+# Korean: LG's large MoE, 237 GB
+LGAI-EXAONE/K-EXAONE-236B-A23B-FP8
+
+# multilingual flagships not covered yet
+CohereLabs/command-a-plus-05-2026-fp8 --reasoning-parser cohere_command4
+mistralai/Mistral-Small-4-119B-2603 --reasoning-parser mistral
+Qwen/Qwen3.8-Flash-Next-FP8 --reasoning-parser qwen3
+# 299 GB, leaves little room for the KV cache
+tencent/Hy3-FP8 --reasoning-parser hy_v3

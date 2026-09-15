@@ -56,7 +56,11 @@ PROVIDERS = {
     "localhost": "Local",
     "127.0.0.1": "Local",
     "::1": "Local",
+    "vast.local": "Vast.ai",
 }
+
+# Written by the vast.ai runner next to a run: GPU, timings and cost of that run.
+SIDECAR_SUFFIX = ".vast.json"
 
 
 def _section_value(payload: Mapping[str, Any], section_name: str, key: str) -> Any:
@@ -88,16 +92,28 @@ def _load_model_info(model_info_file: Path) -> dict[str, dict[str, str]]:
         return {row["model"]: row for row in reader if row.get("model")}
 
 
-def _results(results_dir: Path) -> Iterator[tuple[Mapping[str, Any], Mapping[str, Any]]]:
-    """Yield ``(payload, provenance)`` for every JSON result below ``results_dir``."""
+def _results(results_dir: Path) -> Iterator[tuple[Path, Mapping[str, Any], Mapping[str, Any]]]:
+    """Yield ``(path, payload, provenance)`` for every JSON result below ``results_dir``."""
     for result_file in sorted(results_dir.rglob("*.json")):
+        if result_file.name.endswith(SIDECAR_SUFFIX):
+            continue
         with result_file.open(encoding="utf-8") as handle:
             payload = json.load(handle)
 
         provenance = payload.get("provenance")
         if not isinstance(provenance, Mapping) or not provenance.get("model"):
             raise ValueError(f"{result_file}: missing provenance.model")
-        yield payload, provenance
+        yield result_file, payload, provenance
+
+
+def _sidecar_cost(result_file: Path) -> str | None:
+    """The GPU cost of a vast.ai run, from the sidecar next to it."""
+    sidecar = result_file.with_name(result_file.name.removesuffix(".json") + SIDECAR_SUFFIX)
+    if not sidecar.is_file():
+        return None
+    with sidecar.open(encoding="utf-8") as handle:
+        cost = json.load(handle).get("cost_usd")
+    return None if cost is None else str(cost)
 
 
 def _provider(endpoint: str) -> str:
@@ -137,7 +153,7 @@ def collect_rows(results_dir: Path, cost_file: Path) -> list[dict[str, Any]]:
     costs = _load_costs(cost_file)
     rows: list[dict[str, Any]] = []
 
-    for payload, provenance in _results(results_dir):
+    for result_file, payload, provenance in _results(results_dir):
         summary = payload.get("summary")
         if not isinstance(summary, Mapping):
             summary = {}
@@ -164,7 +180,7 @@ def collect_rows(results_dir: Path, cost_file: Path) -> list[dict[str, Any]]:
                 "exact_match": summary.get("exact_match", 0),
                 "perfect": summary.get("perfect", 0),
                 "unchanged": summary.get("unchanged", 0),
-                "cost": costs.get(model, "0"),
+                "cost": costs[model] if model in costs else _sidecar_cost(result_file) or "0",
             }
         )
 
@@ -179,7 +195,7 @@ def collect_details(results_dir: Path, model_info_file: Path) -> list[dict[str, 
     model_info = _load_model_info(model_info_file)
     rows: list[dict[str, Any]] = []
 
-    for payload, provenance in _results(results_dir):
+    for result_file, payload, provenance in _results(results_dir):
         model = provenance["model"]
         endpoint = provenance.get("endpoint") or ""
         info = model_info.get(model, {})
