@@ -35,7 +35,15 @@ class VllmCommandTests(unittest.TestCase):
         self.assertIn("--served-model-name", command)
         self.assertEqual(command[command.index("--max-model-len") + 1], "16384")
         self.assertEqual(command[command.index("--max-num-seqs") + 1], "128")
+        self.assertIn("--language-model-only", command)
         self.assertNotIn("--tensor-parallel-size", command)
+
+    def test_leaves_multimodal_limits_to_a_line_that_sets_them(self):
+        limited = common.vllm_command(ModelEntry("a/one", ("--limit-mm-per-prompt", '{"image": 1}')), gpu_count=1)
+        explicit = common.vllm_command(ModelEntry("a/one", ("--language-model-only",)), gpu_count=1)
+
+        self.assertNotIn("--language-model-only", limited)
+        self.assertEqual(explicit.count("--language-model-only"), 1)
 
     def test_keeps_the_line_s_own_sequence_limit(self):
         command = common.vllm_command(ModelEntry("a/one", ("--max-num-seqs=48",)), gpu_count=1)

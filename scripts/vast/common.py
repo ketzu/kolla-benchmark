@@ -81,6 +81,11 @@ def vllm_command(entry: ModelEntry, gpu_count: int) -> list[str]:
         args += ["--max-model-len", str(DEFAULT_MAX_MODEL_LEN)]
     if not _has_flag(args, "--max-num-seqs"):
         args += ["--max-num-seqs", str(DEFAULT_MAX_NUM_SEQS)]
+    # The benchmark only sends text. Without image and video inputs vLLM neither loads nor
+    # profiles the vision encoder, which saves memory and skips encoder bugs such as
+    # EXAONE 4.5's missing input_norm in vLLM 0.29.
+    if not _has_flag(args, "--language-model-only", "--limit-mm-per-prompt"):
+        args.append("--language-model-only")
     if gpu_count > 1 and not _has_flag(args, "--tensor-parallel-size", "-tp"):
         args += ["--tensor-parallel-size", str(gpu_count)]
     return [
