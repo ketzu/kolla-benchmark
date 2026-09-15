@@ -28,6 +28,10 @@ VLLM_PORT = 8000
 ENDPOINT = f"http://vast.local:{VLLM_PORT}/v1"
 # Without a limit vLLM reserves KV cache for the full context and small cards fail to load.
 DEFAULT_MAX_MODEL_LEN = 16384
+# vLLM allows 1024 sequences by default. Hybrid models (Qwen3.5 and later, Nemotron-H) need a
+# Mamba cache block per sequence and refuse to start when that many do not fit; the benchmark
+# only sends --concurrency requests at a time.
+DEFAULT_MAX_NUM_SEQS = 128
 # Uploaded next to the source bundle; the instance downloads them first.
 RUNNER_FILES = ("onstart.sh", "runner.py", "common.py")
 # The runner sets these for every model, a batch may not.
@@ -75,6 +79,8 @@ def vllm_command(entry: ModelEntry, gpu_count: int) -> list[str]:
     args = list(entry.vllm_args)
     if not _has_flag(args, "--max-model-len"):
         args += ["--max-model-len", str(DEFAULT_MAX_MODEL_LEN)]
+    if not _has_flag(args, "--max-num-seqs"):
+        args += ["--max-num-seqs", str(DEFAULT_MAX_NUM_SEQS)]
     if gpu_count > 1 and not _has_flag(args, "--tensor-parallel-size", "-tp"):
         args += ["--tensor-parallel-size", str(gpu_count)]
     return [

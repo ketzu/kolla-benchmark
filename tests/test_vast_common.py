@@ -34,7 +34,14 @@ class VllmCommandTests(unittest.TestCase):
         self.assertEqual(command[:3], ["vllm", "serve", "a/one"])
         self.assertIn("--served-model-name", command)
         self.assertEqual(command[command.index("--max-model-len") + 1], "16384")
+        self.assertEqual(command[command.index("--max-num-seqs") + 1], "128")
         self.assertNotIn("--tensor-parallel-size", command)
+
+    def test_keeps_the_line_s_own_sequence_limit(self):
+        command = common.vllm_command(ModelEntry("a/one", ("--max-num-seqs=48",)), gpu_count=1)
+
+        self.assertNotIn("--max-num-seqs", command)
+        self.assertIn("--max-num-seqs=48", command)
 
     def test_splits_across_gpus_unless_the_line_decides(self):
         default = common.vllm_command(ModelEntry("a/one"), gpu_count=4)
