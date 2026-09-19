@@ -14,7 +14,8 @@ launch rents one instance for the batch and returns once it has booted. The inst
 every model with vLLM, benchmarks it, uploads the run to the S3 bucket and destroys itself
 when the list is done or the deadline passes; this machine can go offline in the meantime.
 Everything after -- is passed on to the benchmark. With --prompts every model is benchmarked
-once per prompt of the list while it is served, and pull puts the runs into multiprompt-results/.
+once per prompt of the list while it is served, and pull puts the runs into multiprompt-results/;
+a batch run with --iterate is pulled into iterate-results/.
 
 Credentials come from the environment or .env in the repository root: VAST_API_KEY,
 S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT (unless AWS), optional
@@ -367,9 +368,13 @@ def show_status(storage: Storage, batch: str, now: datetime) -> None:
 
 
 def default_results_dir(manifest: Mapping[str, Any] | None) -> Path:
-    """Prompt matrix runs stay out of results/, where collect_metrics would count them."""
-    prompts = (manifest or {}).get("prompts")
-    return REPOSITORY / ("multiprompt-results" if prompts else "results")
+    """Experiment runs stay out of results/, where collect_metrics would count them. Iterated
+    runs go next to the other iterated runs even with a prompt list: collect_iterate_metrics
+    labels their prompts, collect_prompt_metrics would take them for single answers."""
+    manifest = manifest or {}
+    if "--iterate" in manifest.get("benchmark_args", []):
+        return REPOSITORY / "iterate-results"
+    return REPOSITORY / ("multiprompt-results" if manifest.get("prompts") else "results")
 
 
 def pull(storage: Storage, batch: str, destination: Path, logs: bool) -> int:
@@ -436,7 +441,8 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     fetch.add_argument(
         "--results-dir",
         type=Path,
-        help="where to put <batch>/ (default: results/, multiprompt-results/ for a batch with --prompts)",
+        help="where to put <batch>/ (default: results/, multiprompt-results/ for a batch with "
+        "--prompts, iterate-results/ for one with --iterate)",
     )
 
     options = parser.parse_args(argv)

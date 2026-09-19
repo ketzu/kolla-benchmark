@@ -334,6 +334,13 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(vast_bench.default_results_dir(None).name, "results")
         self.assertEqual(vast_bench.default_results_dir({"prompts": [{"user": "{sentence}"}]}).name, "multiprompt-results")
 
+    def test_iterated_batches_are_pulled_next_to_the_other_iterated_runs(self):
+        iterated = {"benchmark_args": ["--iterate", "--limit", "0"], "prompts": []}
+        self.assertEqual(vast_bench.default_results_dir(iterated).name, "iterate-results")
+        iterated["prompts"] = [{"user": "{sentence}"}]
+        self.assertEqual(vast_bench.default_results_dir(iterated).name, "iterate-results")
+        self.assertEqual(vast_bench.default_results_dir({"benchmark_args": ["--limit", "0"]}).name, "results")
+
     def test_destroy_only_touches_the_batch_instance(self):
         vast = FakeVast(instances=[{"id": 1, "label": "kolla-B"}, {"id": 2, "label": "something else"}])
 

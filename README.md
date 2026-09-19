@@ -121,7 +121,7 @@ uv run scripts/vast/vast_bench.py destroy
 |---|---|
 | `launch` | Rent the cheapest offer matching `--gpu` (vast.ai filter syntax, `gpu_ram` in GB), `--disk` (200 GB) and `--max-dph`, then start the batch. Offers that do not boot within `--boot-timeout` (30m) are destroyed and the next is tried. `--deadline` (12h) destroys the instance no matter what. `--pip PACKAGE` (repeatable) installs extra Python packages on the instance before serving, e.g. `cohere-melody` for Cohere's reasoning parser. `--prompts FILE` runs every prompt of a prompt list against each model, see below. Everything after `--` goes to the benchmark. |
 | `status [BATCH]` | Phase, GPU, cost so far, last heartbeat, and the state and F0.5 of every model. |
-| `pull [BATCH]` | Download the runs into `results/<batch>/` (`multiprompt-results/<batch>/` for a batch with `--prompts`); `--logs` also fetches the vLLM and benchmark logs. |
+| `pull [BATCH]` | Download the runs into `results/<batch>/` (`multiprompt-results/<batch>/` for a batch with `--prompts`, `iterate-results/<batch>/` for one with `--iterate`); `--logs` also fetches the vLLM and benchmark logs. |
 | `destroy [BATCH]` | Destroy the batch's instance by hand. |
 
 `BATCH` defaults to the latest batch in the bucket. The benchmark is built on the instance
@@ -237,6 +237,9 @@ not converged. The default prompt of this experiment is `extended`, as a single 
 ```powershell
 scripts\run-models.ps1 --models scripts\local.txt --results-dir iterate-results --iterate --limit 0
 ```
+
+On [vast.ai](#remote-runs-on-vastai), pass `--iterate` after the `--` of `vast_bench.py launch`;
+`pull` then puts the batch into `iterate-results/<batch>/`, next to the local runs.
 
 Every answer is recorded in the result's `rounds`, but only the last one is scored. Each request is
 retried like a normal one; a request that still fails fails the whole sentence, whose failure
