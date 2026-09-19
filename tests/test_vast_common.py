@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -88,10 +89,31 @@ class ReasoningLeakTests(unittest.TestCase):
     def test_a_plain_answer_is_clean(self):
         self.assertIsNone(common.leaked_reasoning("목요일이었습니다."))
 
-    def test_prompt_follows_the_benchmark_arguments(self):
-        self.assertEqual(common.benchmark_prompt(["--limit", "0"]), common.DEFAULT_PROMPT)
-        self.assertEqual(common.benchmark_prompt(["--prompt", "Fix it."]), "Fix it.")
-        self.assertEqual(common.benchmark_prompt(["--prompt=Fix it."]), "Fix it.")
+    def test_default_prompts_match_their_prompt_variants(self):
+        prompts_file = Path(__file__).resolve().parents[1] / "scripts" / "prompts.json"
+        prompts = json.loads(prompts_file.read_text(encoding="utf-8"))
+        variants = {(p["name"], "system" in p): p for p in prompts}
+        self.assertEqual(common.DEFAULT_SYSTEM, variants["simple", True]["system"])
+        self.assertEqual(common.EXTENDED_PROMPT, variants["extended", False]["user"])
+
+    def test_messages_follow_the_benchmark_arguments(self):
+        def messages(*args):
+            return [(m["role"], m["content"]) for m in common.benchmark_messages(args, "문장")]
+
+        self.assertEqual(
+            messages("--limit", "0"), [("system", common.DEFAULT_SYSTEM), ("user", "문장")]
+        )
+        self.assertEqual(messages("--prompt", "Fix: {sentence}"), [("user", "Fix: 문장")])
+        self.assertEqual(messages("--prompt=Fix: {sentence}"), [("user", "Fix: 문장")])
+        self.assertEqual(
+            messages("--system", "Be brief.", "--prompt", "Fix: {sentence}"),
+            [("system", "Be brief."), ("user", "Fix: 문장")],
+        )
+        self.assertEqual(messages("--system=Be brief."), [("system", "Be brief."), ("user", "문장")])
+        self.assertEqual(
+            messages("--iterate"),
+            [("user", common.EXTENDED_PROMPT.replace("{sentence}", "문장"))],
+        )
 
 
 class HelperTests(unittest.TestCase):

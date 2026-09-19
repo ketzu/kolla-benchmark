@@ -6,7 +6,25 @@ Goal of this benchmark is to score LLMs on zero-shot corrections for korean lang
 
 ## Structure
 
-The benchmark uses an OpenAI compatible endpoint to score the [KoLLA v2](data/README.md) dataset with the prompt `Correct the Korean sentence. Reply with the corrected sentence only. {sentence}`.
+The benchmark uses an OpenAI compatible endpoint to score the [KoLLA v2](data/README.md) dataset.
+By default every sentence is sent as the user message, after this system message
+(the `simple` system prompt of [scripts/prompts.json](scripts/prompts.json)):
+
+```
+Correct the Korean sentence. Reply with the corrected sentence only.
+```
+
+`--prompt` replaces the user message with a template; the sentence is substituted for
+`{sentence}`, which it must contain. Once `--prompt` is given, no system message is sent unless
+`--system` sets one; `--system` alone replaces the default system message and keeps the bare
+sentence as user message. For example, the `extended` prompt as a single user message:
+
+```bash
+cargo run --release -- --model google/gemini-2.5-flash --prompt "Correct the following korean sentence. Only correct actual errors. Reply with only the corrected sentence. {sentence}"
+```
+
+The benchmark as it stood before the prompt and iteration experiments were merged in is tagged
+`benchmark-v1`.
 
 KoLLA v2 contains two annotations and the result from the API is scored against both.
 The better score is chosen for that particular sentence.
@@ -113,6 +131,15 @@ gets a `<model>.vast.json` next to it with GPU, vLLM version, timings, and the G
 that run; `collect_metrics.py` reports these runs with provider `Vast.ai` and takes their
 cost from it unless `results/cost.csv` has one.
 
+Both this script and the multi-prompt collector describe each run's model next to its id.
+`provider` comes from the run's endpoint (`OpenRouter`, `Local` for localhost, `Vast.ai`, or
+the endpoint's host).
+`company`, `params`, `quantization` and `file_bytes` come from
+[scripts/model-info.csv](scripts/model-info.csv), which is maintained by hand. A model missing
+from that file gets empty cells. For LM Studio models, `lms ls --json` lists the parameters,
+quantization and file size. OpenRouter doesn't expose how a hosted model is served, so those
+cells stay empty.
+
 Full command usage:
 
 ```bash
@@ -122,17 +149,89 @@ Options:
       --api-key <API_KEY>          API Key to send along with requests [env: API_KEY=]
   -m, --model <MODEL>              Model to evaluate
   -u, --url <URL>                  Base URL for OpenAI compatible request [default: https://openrouter.ai/api/v1]
-      --prompt <PROMPT>            Instruction the challenge sentence is wrapped in [default: "Correct the Korean sentence. Reply with the corrected sentence only."]
+      --system <SYSTEM>            System prompt sent before the user message [default: the original benchmark instruction, unless --prompt or --iterate is given; then no system message is sent]
+      --prompt <PROMPT>            User prompt template; {sentence} is replaced by the challenge sentence [default: the bare sentence, or the extended prompt with --iterate]
   -d, --data <DATA>                KoLLA M2 annotations to evaluate against [default: data/KoLLA_multi-refs.m2]
   -l, --limit <LIMIT>              Sentences to evaluate; 0 runs the whole corpus (that costs real money) [default: 25]
   -c, --concurrency <CONCURRENCY>  Requests in flight at the same time [default: 10]
-  -o, --output <OUTPUT>            Where to write the run; defaults to results/<model>-<timestamp>.json
+      --iterate                    Send every answer back as the sentence to correct until the model returns it unchanged
+      --max-iterations <N>         Requests per sentence before an iterated sentence stops without settling [default: 10]
+  -o, --output <OUTPUT>            Where to write the run; defaults to results/<model>-<timestamp>.json, or to iterate-results/ with --iterate
       --rescore <RESCORE>          Score a previously written run again instead of calling the API
       --baseline                   Score the corpus against itself instead of calling the API
   -h, --help                       Print help
   -V, --version                    Print version
 ```
 
+## Concurrency
+
+`--concurrency` requests are kept in flight for as long as sentences remain: the moment any
+request finishes the next one starts, even when an earlier sentence is still waiting on a slow
+answer. Answers are scored only once all requests are done, so scoring never delays the network,
+and are written in corpus order. A request waiting out a retry backoff keeps its slot, so an
+endpoint that throttles sees fewer requests; the progress bar counts those as backing off.
+
+For LM Studio, set `--concurrency` to the number of parallel requests the loaded model is
+configured for. Requests beyond that wait in LM Studio's queue, and that waiting counts towards
+the 120 second request timeout.
+
+## Multi-prompt experiment
+
+Separate from the primary benchmark, every model can be run against every prompt of
+[scripts/prompts.json](scripts/prompts.json): four prompt styles, each as a single user message
+and as a system prompt followed by the bare sentence.
+
+| Name | Prompt |
+|---|---|
+| `simple` | Correct the Korean sentence. Reply with the corrected sentence only. |
+| `extended` | `simple`, but only correct actual errors. |
+| `long` | Multi-line instructions about learner errors, meaning preservation and style. |
+| `korean` | The same instructions in Korean, ending in `문장: {sentence}` / `교정문:`. |
+
+```powershell
+scripts\run-models.ps1 --models scripts\local.txt --prompts scripts\prompts.json --limit 0
+```
+
+Its runs are collected with their own script:
+
+```bash
+uv run --no-project python ./scripts/collect_prompt_metrics.py --results-dir multiprompt-results
+```
+
+It writes `prompt-metrics.csv`, one row per run, and `prompt-matrix.csv`, the F0.5 of every model
+(rows) for every prompt variant (columns; the latest run wins when a model ran a variant twice),
+into the results directory. Every run is labelled along two axes. `prompt_name` is the `name` of
+the entry in `scripts/prompts.json` whose system prompt and user template the run sent (`custom`
+when none matches), so renaming a prompt there relabels old runs too. `prompt_type` is `user` when
+the prompt went out as a single user message and `system+user` when a system prompt came first.
+There is no cost column: the cost file holds one total per model, which cannot be split by prompt.
+
+
+## Iterated correction experiment
+
+`--iterate` tests whether a model settles on its own correction. Each sentence is first sent as
+usual. The answer is then sent back in a fresh single-turn request, in place of the sentence, until
+an answer tokenizes the same as the text it was sent: the model considers it correct. A model that
+returns the original unchanged therefore takes one request. `--max-iterations` (default 10) caps
+the requests per sentence; a sentence that reaches it is scored on its last answer and counted as
+not converged. The default prompt of this experiment is `extended`, as a single user message;
+`--prompt` and `--system` still override it.
+
+```powershell
+scripts\run-models.ps1 --models scripts\local.txt --results-dir iterate-results --iterate --limit 0
+```
+
+Every answer is recorded in the result's `rounds`, but only the last one is scored. Each request is
+retried like a normal one; a request that still fails fails the whole sentence, whose failure
+entry keeps the rounds received before it. A sentence keeps its concurrency slot for its whole
+chain. The run's `summary.requests` holds how many sentences converged and the requests per scored
+sentence: total, p25, median, mean, p75, p90 and max, percentiles interpolated linearly.
+
+Its runs are collected with their own script, which writes `iterate-metrics.csv`, one row per run:
+
+```bash
+uv run --no-project python ./scripts/collect_iterate_metrics.py --results-dir iterate-results
+```
 
 ## Scoring
 

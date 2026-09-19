@@ -78,8 +78,8 @@ class FakeSystem:
         output.write_text(json.dumps(run), encoding="utf-8")
         return 0
 
-    def probe(self, model, prompt):
-        self.probes.append((model, prompt))
+    def probe(self, model, messages):
+        self.probes.append((model, messages))
         return "<think>\nOkay\n</think>\n목요일" if model in self.leaking_probe else "목요일"
 
     def monotonic(self):
@@ -194,7 +194,10 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(record["state"], "failed")
         self.assertIn("--reasoning-parser", record["error"])
         self.assertEqual([command[command.index("--model") + 1] for command in system.benchmarks], ["b/two"])
-        self.assertEqual(system.probes[0], ("a/one", common.DEFAULT_PROMPT))
+        self.assertEqual(
+            system.probes[0],
+            ("a/one", common.benchmark_messages([], runner.PROBE_SENTENCE)),
+        )
         self.assertEqual(system.stopped, list(MODELS))
 
     def test_a_run_with_reasoning_in_its_answers_is_rejected(self):

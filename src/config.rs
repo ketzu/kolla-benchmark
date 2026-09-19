@@ -1,4 +1,4 @@
-use crate::openai::DEFAULT_PROMPT;
+use crate::openai::{DEFAULT_SYSTEM, EXTENDED_PROMPT, SENTENCE_PLACEHOLDER};
 use clap::Parser;
 use std::path::PathBuf;
 use url::Url;
@@ -15,9 +15,14 @@ pub struct Config {
     /// Base URL for OpenAI compatible request
     #[arg(short, long, default_value = "https://openrouter.ai/api/v1")]
     pub url: Url,
-    /// Instruction the challenge sentence is wrapped in
-    #[arg(long, default_value = DEFAULT_PROMPT)]
-    pub prompt: String,
+    /// System prompt sent before the user message [default: the original benchmark instruction,
+    /// unless --prompt or --iterate is given; then no system message is sent]
+    #[arg(long)]
+    system: Option<String>,
+    /// User prompt template; {sentence} is replaced by the challenge sentence [default: the bare
+    /// sentence, or the extended prompt with --iterate]
+    #[arg(long, value_parser = prompt_template)]
+    prompt: Option<String>,
     /// KoLLA M2 annotations to evaluate against
     #[arg(short, long, default_value = "data/KoLLA_multi-refs.m2")]
     pub data: PathBuf,
@@ -27,7 +32,14 @@ pub struct Config {
     /// Requests in flight at the same time
     #[arg(short, long, default_value_t = 10)]
     pub concurrency: usize,
-    /// Where to write the run; defaults to results/<model>-<timestamp>.json
+    /// Send every answer back as the sentence to correct until the model returns it unchanged
+    #[arg(long, conflicts_with_all = ["rescore", "baseline"])]
+    pub iterate: bool,
+    /// Requests per sentence before an iterated sentence stops without settling
+    #[arg(long, default_value_t = 10, requires = "iterate", value_parser = at_least_one)]
+    pub max_iterations: usize,
+    /// Where to write the run; defaults to results/<model>-<timestamp>.json, or to
+    /// iterate-results/ with --iterate
     #[arg(short, long)]
     pub output: Option<PathBuf>,
     /// Score a previously written run again instead of calling the API
@@ -36,4 +48,102 @@ pub struct Config {
     /// Score the corpus against itself instead of calling the API
     #[arg(long, conflicts_with_all = ["api_key", "model", "rescore"])]
     pub baseline: bool,
+}
+
+impl Config {
+    /// The system prompt to send: the one given, else the original instruction for a plain run
+    /// that names no prompt of its own.
+    pub fn system(&self) -> Option<String> {
+        match (&self.system, &self.prompt, self.iterate) {
+            (Some(system), _, _) => Some(system.clone()),
+            (None, None, false) => Some(DEFAULT_SYSTEM.to_owned()),
+            (None, _, _) => None,
+        }
+    }
+
+    /// The prompt template to send: the one given, else the default of the experiment.
+    pub fn prompt(&self) -> String {
+        match (&self.prompt, self.iterate) {
+            (Some(prompt), _) => prompt.clone(),
+            (None, false) => SENTENCE_PLACEHOLDER.to_owned(),
+            (None, true) => EXTENDED_PROMPT.to_owned(),
+        }
+    }
+
+    /// The most requests an iterated sentence may take; none when every sentence is asked once.
+    pub fn iterations(&self) -> Option<usize> {
+        self.iterate.then_some(self.max_iterations)
+    }
+}
+
+/// A prompt without the placeholder would never show the model the sentence.
+fn prompt_template(prompt: &str) -> Result<String, String> {
+    if prompt.contains(SENTENCE_PLACEHOLDER) {
+        Ok(prompt.to_owned())
+    } else {
+        Err(format!("the prompt must contain {SENTENCE_PLACEHOLDER}"))
+    }
+}
+
+/// An iterated sentence is asked at least once.
+fn at_least_one(value: &str) -> Result<usize, String> {
+    match value.parse::<usize>() {
+        Ok(0) => Err("at least one request is needed".to_owned()),
+        Ok(count) => Ok(count),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Config, clap::Error> {
+        let base = ["kolla-benchmark", "--api-key", "key", "--model", "model"];
+        Config::try_parse_from(base.iter().chain(args))
+    }
+
+    #[test]
+    fn the_default_prompt_depends_on_the_experiment() {
+        let single = parse(&[]).unwrap();
+        assert_eq!(single.system().as_deref(), Some(DEFAULT_SYSTEM));
+        assert_eq!(single.prompt(), SENTENCE_PLACEHOLDER);
+        assert_eq!(single.iterations(), None);
+
+        let iterated = parse(&["--iterate"]).unwrap();
+        assert_eq!(iterated.system(), None);
+        assert_eq!(iterated.prompt(), EXTENDED_PROMPT);
+        assert_eq!(iterated.iterations(), Some(10));
+    }
+
+    #[test]
+    fn a_given_prompt_drops_the_default_system_prompt() {
+        let prompted = parse(&["--prompt", "Fix: {sentence}"]).unwrap();
+        assert_eq!(prompted.system(), None);
+
+        let both = parse(&["--system", "Be brief.", "--prompt", "Fix: {sentence}"]).unwrap();
+        assert_eq!(both.system().as_deref(), Some("Be brief."));
+
+        let system_only = parse(&["--system", "Be brief."]).unwrap();
+        assert_eq!(system_only.system().as_deref(), Some("Be brief."));
+        assert_eq!(system_only.prompt(), SENTENCE_PLACEHOLDER);
+    }
+
+    #[test]
+    fn a_given_prompt_wins_over_the_default() {
+        let config = parse(&["--iterate", "--prompt", "Fix: {sentence}"]).unwrap();
+        assert_eq!(config.prompt(), "Fix: {sentence}");
+    }
+
+    #[test]
+    fn max_iterations_needs_iterate_and_at_least_one_request() {
+        assert!(parse(&["--max-iterations", "3"]).is_err());
+        assert!(parse(&["--iterate", "--max-iterations", "0"]).is_err());
+        assert_eq!(
+            parse(&["--iterate", "--max-iterations", "3"])
+                .unwrap()
+                .iterations(),
+            Some(3)
+        );
+    }
 }

@@ -1,7 +1,7 @@
-use crate::analysis::{Data, Dataset, Failure, Provenance, Run};
+use crate::analysis::{Data, Dataset, Failure, Provenance, Round, Run};
 use crate::config::Config;
 use crate::loader::{Base, load_m2};
-use crate::openai::Api;
+use crate::openai::{Api, Response};
 use clap::Parser;
 use eyre::Result;
 use futures::StreamExt;
@@ -73,88 +73,214 @@ async fn benchmark(config: &Config) -> Result<Run> {
         dataset.sentences,
         config.url
     );
+    if let Some(max_iterations) = config.iterations() {
+        println!("Sending every answer back, up to {max_iterations} requests per sentence");
+    }
 
+    let prompt = config.prompt();
     let api = Api::new(
         key,
         config.url.clone(),
         model.clone(),
-        config.prompt.clone(),
+        config.system(),
+        prompt.clone(),
     );
     let total = challenges.len();
-    let breaker = Arc::new(CircuitBreaker::default());
+    let breaker = CircuitBreaker::default();
     let progress = Progress::new(total, &model);
-    let api_ref = &api;
-    let progress_ref = progress.clone();
-    let answers: Vec<Result<Data, Failure>> =
-        futures::stream::iter(challenges.into_iter().enumerate())
-            .map(|(index, challenge)| {
-                let breaker = Arc::clone(&breaker);
-                let progress = progress_ref.clone();
-                async move { ask(api_ref, challenge, index, total, breaker, progress).await }
-            })
-            // Ordered, so that two runs of the same corpus produce comparable files.
-            .buffered(config.concurrency.max(1))
-            // Include the item that opened the circuit, then drop queued and in-flight work.
-            .scan(false, |stopped, outcome| {
-                if *stopped {
-                    return std::future::ready(None);
-                }
-                if outcome.stop {
-                    *stopped = true;
-                }
-                std::future::ready(Some(outcome.result))
-            })
-            .collect()
-            .await;
+    let (api, breaker, progress) = (&api, &breaker, &progress);
+    let originals = challenges
+        .iter()
+        .map(|challenge| challenge.original.as_str());
+    let answers = match config.iterations() {
+        None => {
+            saturate(
+                originals,
+                config.concurrency,
+                |index, original| async move {
+                    let _worker = progress.start();
+                    ask(api, original.to_owned(), index, total, breaker, progress)
+                        .await
+                        .map(|result| result.map(Answer::Once))
+                },
+            )
+            .await
+        }
+        Some(max_iterations) => {
+            saturate(
+                originals,
+                config.concurrency,
+                |index, original| async move {
+                    let _worker = progress.start();
+                    iterate(original, max_iterations, |sentence| {
+                        ask(api, sentence, index, total, breaker, progress)
+                    })
+                    .await
+                },
+            )
+            .await
+        }
+    };
     progress.finish(breaker.is_open());
 
-    let (results, failures): (Vec<_>, Vec<_>) = answers.into_iter().partition(Result::is_ok);
+    // Scored only once every request is done, so that scoring never holds up the network.
+    let mut results = Vec::with_capacity(total);
+    let mut failures = Vec::new();
+    for (index, (challenge, answer)) in challenges.into_iter().zip(answers).enumerate() {
+        match answer {
+            // Never answered: the run stopped first.
+            None => {}
+            Some(Err(failure)) => failures.push(failure),
+            Some(Ok(answer)) => {
+                let original = challenge.original.clone();
+                let data = match answer {
+                    Answer::Once(response) => Data::new(challenge, response),
+                    Answer::Iterated { rounds, converged } => {
+                        Ok(Data::iterated(challenge, rounds, converged))
+                    }
+                };
+                match data {
+                    Ok(data) => results.push(data),
+                    Err(error) => {
+                        eprintln!(
+                            "[{}/{}] response could not be scored and will not be retried: {}",
+                            index + 1,
+                            total,
+                            error
+                        );
+                        failures.push(failure(&original, error));
+                    }
+                }
+            }
+        }
+    }
+
     let provenance = Provenance::new(
         model,
         config.url.to_string(),
-        config.prompt.clone(),
+        config.system(),
+        prompt,
+        config.iterations(),
         dataset,
     );
-    Ok(Run::new(
-        provenance,
-        results.into_iter().map(Result::unwrap).collect(),
-        failures.into_iter().map(Result::unwrap_err).collect(),
-    ))
+    Ok(Run::new(provenance, results, failures))
 }
 
-/// One sentence, retried a few times; repeated retry exhaustion stops the run.
+/// What came back for one sentence, before it is scored.
+#[derive(Debug)]
+enum Answer {
+    Once(Response),
+    Iterated { rounds: Vec<Round>, converged: bool },
+}
+
+/// Send the sentence, then every answer back in its place, until an answer tokenizes the same as
+/// the text it was sent or `max_iterations` requests were made. A request that fails fails the
+/// whole sentence, which keeps the rounds that came back before it.
+async fn iterate<Fut>(
+    original: &str,
+    max_iterations: usize,
+    mut ask: impl FnMut(String) -> Fut,
+) -> Outcome<Result<Answer, Failure>>
+where
+    Fut: Future<Output = Outcome<Result<Response, Failure>>>,
+{
+    let mut rounds = Vec::new();
+    let mut sent = original.to_owned();
+    loop {
+        let Outcome { result, stop } = ask(sent.clone()).await;
+        let round = result
+            .map_err(|failure| failure.error)
+            .and_then(|response| Round::of(response).map_err(|error| error.to_string()));
+        let round = match round {
+            Ok(round) => round,
+            Err(error) => {
+                return Outcome {
+                    result: Err(Failure {
+                        original: original.to_owned(),
+                        error,
+                        rounds,
+                    }),
+                    stop,
+                };
+            }
+        };
+
+        let converged = scorer::tokenize(&round.answer) == scorer::tokenize(&sent);
+        sent = round.answer.clone();
+        rounds.push(round);
+        if converged || rounds.len() >= max_iterations {
+            return Outcome {
+                result: Ok(Answer::Iterated { rounds, converged }),
+                stop,
+            };
+        }
+    }
+}
+
+/// Run `work` on every item with `concurrency` items in flight for as long as there are items
+/// left: the moment any one finishes, the next one starts. Ordered buffering would not do that —
+/// a finished item waiting for a slower one before it keeps holding its slot.
+///
+/// Answers come back in item order. The run stops after the first outcome that asks for it,
+/// dropping the work still in flight; items that never finished answer `None`.
+async fn saturate<T, O, Fut>(
+    items: impl ExactSizeIterator<Item = T>,
+    concurrency: usize,
+    mut work: impl FnMut(usize, T) -> Fut,
+) -> Vec<Option<O>>
+where
+    Fut: Future<Output = Outcome<O>>,
+{
+    let mut answers: Vec<Option<O>> = (0..items.len()).map(|_| None).collect();
+    let mut outcomes = futures::stream::iter(items.enumerate())
+        .map(|(index, item)| {
+            let outcome = work(index, item);
+            async move { (index, outcome.await) }
+        })
+        .buffer_unordered(concurrency.max(1));
+    while let Some((index, outcome)) = outcomes.next().await {
+        answers[index] = Some(outcome.result);
+        if outcome.stop {
+            break;
+        }
+    }
+    answers
+}
+
+/// One request for a sentence, retried a few times; repeated retry exhaustion stops the run.
 async fn ask(
     api: &Api,
-    challenge: Base,
+    original: String,
     index: usize,
     total: usize,
-    breaker: Arc<CircuitBreaker>,
-    progress: Progress,
-) -> AskOutcome {
-    let _worker = progress.start();
-    let original = challenge.original.clone();
+    breaker: &CircuitBreaker,
+    progress: &Progress,
+) -> Outcome<Result<Response, Failure>> {
     let mut retries = 0;
-    let response = loop {
+    loop {
         if breaker.is_open() {
             progress.log(format!(
                 "[{}/{}] not retried because the benchmark circuit is open",
                 index + 1,
                 total
             ));
-            return AskOutcome {
-                result: Err(Failure {
-                    original,
-                    error: "benchmark stopped after repeated retry-exhausted failures".into(),
-                }),
+            return Outcome {
+                result: Err(failure(
+                    &original,
+                    "benchmark stopped after repeated retry-exhausted failures",
+                )),
                 stop: true,
             };
         }
 
         let attempt = retries + 1;
-        match api.send(challenge.original.clone()).await {
+        match api.send(original.to_owned()).await {
             Ok(response) => {
                 breaker.record_success();
-                break response;
+                return Outcome {
+                    result: Ok(response),
+                    stop: false,
+                };
             }
             Err(error) if !error.is_retryable() => {
                 progress.log(format!(
@@ -164,7 +290,7 @@ async fn ask(
                     attempt,
                     error
                 ));
-                return AskOutcome {
+                return Outcome {
                     result: Err(failure(&original, error)),
                     stop: false,
                 };
@@ -184,7 +310,7 @@ async fn ask(
                         MAX_CONSECUTIVE_FAILURES
                     ));
                 }
-                return AskOutcome {
+                return Outcome {
                     result: Err(failure(&original, error)),
                     stop: opened_now,
                 };
@@ -202,26 +328,10 @@ async fn ask(
                     RETRIES,
                     delay
                 ));
+                // The sentence keeps its slot while it waits: an endpoint that asks us to back
+                // off should see fewer requests, not the same number from other sentences.
+                let _waiting = progress.back_off();
                 tokio::time::sleep(delay).await;
-            }
-        }
-    };
-
-    match Data::new(challenge, response) {
-        Ok(data) => AskOutcome {
-            result: Ok(data),
-            stop: false,
-        },
-        Err(error) => {
-            progress.log(format!(
-                "[{}/{}] response could not be scored and will not be retried: {}",
-                index + 1,
-                total,
-                error
-            ));
-            AskOutcome {
-                result: Err(failure(&original, error)),
-                stop: false,
             }
         }
     }
@@ -231,18 +341,30 @@ fn failure(original: &str, error: impl std::fmt::Display) -> Failure {
     Failure {
         original: original.to_owned(),
         error: error.to_string(),
+        rounds: Vec::new(),
     }
 }
 
-struct AskOutcome {
-    result: Result<Data, Failure>,
+struct Outcome<T> {
+    result: T,
     stop: bool,
+}
+
+impl<T> Outcome<T> {
+    fn map<U>(self, map: impl FnOnce(T) -> U) -> Outcome<U> {
+        Outcome {
+            result: map(self.result),
+            stop: self.stop,
+        }
+    }
 }
 
 #[derive(Clone)]
 struct Progress {
     bar: ProgressBar,
-    in_flight: Arc<AtomicUsize>,
+    /// Sentences started and not yet finished, including those waiting out a backoff.
+    active: Arc<AtomicUsize>,
+    backing_off: Arc<AtomicUsize>,
     total: u64,
 }
 
@@ -260,13 +382,14 @@ impl Progress {
         bar.enable_steady_tick(Duration::from_secs(1));
         Self {
             bar,
-            in_flight: Arc::new(AtomicUsize::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            backing_off: Arc::new(AtomicUsize::new(0)),
             total,
         }
     }
 
     fn start(&self) -> ProgressTask {
-        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        self.active.fetch_add(1, Ordering::SeqCst);
         self.update_message();
         ProgressTask {
             progress: self.clone(),
@@ -274,16 +397,30 @@ impl Progress {
     }
 
     fn complete(&self) {
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.active.fetch_sub(1, Ordering::SeqCst);
         self.bar.inc(1);
         self.update_message();
     }
 
+    fn back_off(&self) -> BackingOff {
+        self.backing_off.fetch_add(1, Ordering::SeqCst);
+        self.update_message();
+        BackingOff {
+            progress: self.clone(),
+        }
+    }
+
     fn update_message(&self) {
-        self.bar.set_message(format!(
-            "{} in flight",
-            self.in_flight.load(Ordering::SeqCst)
-        ));
+        let backing_off = self.backing_off.load(Ordering::SeqCst);
+        let in_flight = self
+            .active
+            .load(Ordering::SeqCst)
+            .saturating_sub(backing_off);
+        let message = match backing_off {
+            0 => format!("{in_flight} in flight"),
+            _ => format!("{in_flight} in flight, {backing_off} backing off"),
+        };
+        self.bar.set_message(message);
     }
 
     fn log(&self, message: String) {
@@ -306,7 +443,7 @@ impl Progress {
 
     #[cfg(test)]
     fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::SeqCst)
+        self.active.load(Ordering::SeqCst) - self.backing_off.load(Ordering::SeqCst)
     }
 }
 
@@ -317,6 +454,17 @@ struct ProgressTask {
 impl Drop for ProgressTask {
     fn drop(&mut self) {
         self.progress.complete();
+    }
+}
+
+struct BackingOff {
+    progress: Progress,
+}
+
+impl Drop for BackingOff {
+    fn drop(&mut self) {
+        self.progress.backing_off.fetch_sub(1, Ordering::SeqCst);
+        self.progress.update_message();
     }
 }
 
@@ -442,9 +590,173 @@ mod tests {
             let _worker = progress.start();
             assert_eq!(progress.in_flight(), 1);
             assert_eq!(progress.position(), 0);
+            {
+                let _waiting = progress.back_off();
+                assert_eq!(progress.in_flight(), 0);
+            }
+            assert_eq!(progress.in_flight(), 1);
         }
 
         assert_eq!(progress.in_flight(), 0);
         assert_eq!(progress.position(), 1);
+    }
+
+    fn done<T>(result: T) -> Outcome<T> {
+        Outcome {
+            result,
+            stop: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn saturate_refills_slots_while_an_earlier_item_is_still_running() {
+        let started = AtomicUsize::new(0);
+        let started_when_first_finished = AtomicUsize::new(0);
+
+        let answers = saturate(0..12, 3, |index, item| {
+            let (started, first) = (&started, &started_when_first_finished);
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                let millis = if index == 0 { 400 } else { 10 };
+                tokio::time::sleep(Duration::from_millis(millis)).await;
+                if index == 0 {
+                    first.store(started.load(Ordering::SeqCst), Ordering::SeqCst);
+                }
+                done(item * 10)
+            }
+        })
+        .await;
+
+        // Ordered buffering would have started only the first three before the first finished.
+        assert_eq!(started_when_first_finished.load(Ordering::SeqCst), 12);
+        assert_eq!(
+            answers,
+            (0..12).map(|item| Some(item * 10)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn saturate_never_exceeds_the_concurrency() {
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+
+        saturate(0..40, 4, |index, _| {
+            let (running, peak) = (&running, &peak);
+            async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1 + (index as u64 * 7) % 13)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+                done(())
+            }
+        })
+        .await;
+
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn saturate_stops_after_the_outcome_that_asks_for_it() {
+        let answers = saturate(0..5, 1, |index, item| async move {
+            Outcome {
+                result: item,
+                stop: index == 2,
+            }
+        })
+        .await;
+
+        assert_eq!(answers, vec![Some(0), Some(1), Some(2), None, None]);
+    }
+
+    fn reply(answer: &str) -> Outcome<Result<Response, Failure>> {
+        done(Ok(Response {
+            choices: vec![crate::openai::Choice {
+                message: crate::openai::Message {
+                    role: "assistant".into(),
+                    content: Some(answer.into()),
+                },
+            }],
+            usage: None,
+        }))
+    }
+
+    /// Iterate `original` against answers given in order, returning what was sent too.
+    async fn iterate_over(
+        original: &str,
+        max_iterations: usize,
+        replies: Vec<Outcome<Result<Response, Failure>>>,
+    ) -> (Outcome<Result<Answer, Failure>>, Vec<String>) {
+        let mut sent = Vec::new();
+        let mut replies = replies.into_iter();
+        let outcome = iterate(original, max_iterations, |sentence| {
+            sent.push(sentence);
+            let reply = replies.next().expect("asked more often than expected");
+            async move { reply }
+        })
+        .await;
+        (outcome, sent)
+    }
+
+    fn answers(rounds: &[Round]) -> Vec<&str> {
+        rounds.iter().map(|round| round.answer.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn iterate_stops_when_the_first_answer_is_the_sentence_unchanged() {
+        // Only the space before the full stop differs, which tokenizes away.
+        let (outcome, sent) = iterate_over(
+            "우리는 배가 고펐습니다 .",
+            10,
+            vec![reply("우리는 배가 고펐습니다.")],
+        )
+        .await;
+
+        let Ok(Answer::Iterated { rounds, converged }) = outcome.result else {
+            panic!("expected an iterated answer");
+        };
+        assert!(converged);
+        assert_eq!(answers(&rounds), ["우리는 배가 고펐습니다."]);
+        assert_eq!(sent, ["우리는 배가 고펐습니다 ."]);
+    }
+
+    #[tokio::test]
+    async fn iterate_sends_every_answer_back_until_one_repeats() {
+        let (outcome, sent) = iterate_over("a", 10, vec![reply("b"), reply("c"), reply("c")]).await;
+
+        let Ok(Answer::Iterated { rounds, converged }) = outcome.result else {
+            panic!("expected an iterated answer");
+        };
+        assert!(converged);
+        assert_eq!(answers(&rounds), ["b", "c", "c"]);
+        assert_eq!(sent, ["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn iterate_gives_up_after_max_iterations() {
+        let (outcome, sent) = iterate_over("a", 2, vec![reply("b"), reply("a")]).await;
+
+        let Ok(Answer::Iterated { rounds, converged }) = outcome.result else {
+            panic!("expected an iterated answer");
+        };
+        assert!(!converged);
+        assert_eq!(answers(&rounds), ["b", "a"]);
+        assert_eq!(sent.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_round_fails_the_sentence_and_keeps_the_rounds_before_it() {
+        let failed = Outcome {
+            result: Err(failure("b", "boom")),
+            stop: true,
+        };
+        let (outcome, _) = iterate_over("a", 10, vec![reply("b"), failed]).await;
+
+        assert!(outcome.stop);
+        let Err(failure) = outcome.result else {
+            panic!("expected a failure");
+        };
+        assert_eq!(failure.original, "a");
+        assert_eq!(failure.error, "boom");
+        assert_eq!(answers(&failure.rounds), ["b"]);
     }
 }

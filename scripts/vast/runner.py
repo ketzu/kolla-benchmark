@@ -38,7 +38,7 @@ from common import (
     WORK,
     ModelEntry,
     Storage,
-    benchmark_prompt,
+    benchmark_messages,
     cost_usd,
     key,
     leaked_reasoning,
@@ -110,12 +110,9 @@ class System:
         except OSError:
             return False
 
-    def probe(self, model: str, prompt: str) -> str:
-        """The answer the served model gives to one sentence."""
-        body = {
-            "model": model,
-            "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": PROBE_SENTENCE}],
-        }
+    def probe(self, model: str, messages: list[dict[str, str]]) -> str:
+        """The answer the served model gives to one request."""
+        body = {"model": model, "messages": messages}
         request = urllib.request.Request(
             f"http://127.0.0.1:{VLLM_PORT}/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -243,7 +240,8 @@ class Runner:
             startup_seconds = self.system.monotonic() - started
 
             # Without the right --reasoning-parser the think block is scored as the correction.
-            answer = self.system.probe(model, benchmark_prompt(self.manifest["benchmark_args"]))
+            messages = benchmark_messages(self.manifest["benchmark_args"], PROBE_SENTENCE)
+            answer = self.system.probe(model, messages)
             marker = leaked_reasoning(answer)
             if marker:
                 raise ModelFailed(

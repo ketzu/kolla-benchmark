@@ -101,8 +101,17 @@ class CollectMetricsTests(unittest.TestCase):
                 "eval,provider/has-cost,1.234567,100\n",
                 encoding="utf-8",
             )
+            model_info_file = root / "model-info.csv"
+            model_info_file.write_text(
+                "model,company,params,quantization,file_bytes\n"
+                "provider/has-cost,Maker,3B,Q8_0,1234\n",
+                encoding="utf-8",
+            )
             payload = {
-                "provenance": {"model": "provider/has-cost"},
+                "provenance": {
+                    "model": "provider/has-cost",
+                    "endpoint": "http://localhost:1234/v1",
+                },
                 "metrics": {"precision": 0.5, "recall": 0.4, "f05": 0.45},
                 "counts": {"tp": 10, "fp": 2, "fn": 3},
                 "summary": {
@@ -120,12 +129,17 @@ class CollectMetricsTests(unittest.TestCase):
             other_payload["provenance"] = {"model": "provider/no-cost"}
             self.write_json(results_dir / "batch-b" / "nested" / "second.json", other_payload)
 
-            rows = collect_rows(results_dir, cost_file)
+            rows = collect_rows(results_dir, cost_file, model_info_file)
 
             self.assertEqual(
                 [row["model"] for row in rows],
                 ["provider/has-cost", "provider/no-cost"],
             )
+            self.assertEqual(rows[0]["provider"], "Local")
+            self.assertEqual(rows[0]["company"], "Maker")
+            self.assertEqual(rows[0]["quantization"], "Q8_0")
+            self.assertEqual(rows[1]["provider"], "")
+            self.assertEqual(rows[1]["company"], "")
             self.assertEqual(rows[0]["precision"], 0.5)
             self.assertEqual(rows[0]["tp"], 10)
             self.assertEqual(rows[0]["sentences"], 20)
@@ -155,7 +169,7 @@ class CollectMetricsTests(unittest.TestCase):
             cost_file = root / "cost.csv"
             cost_file.write_text("API Key,Model,Value\neval,Qwen/priced,9.5\n", encoding="utf-8")
 
-            rows = collect_rows(results_dir, cost_file)
+            rows = collect_rows(results_dir, cost_file, root / "missing.csv")
             details = collect_details(results_dir, root / "missing.csv")
 
             self.assertEqual(

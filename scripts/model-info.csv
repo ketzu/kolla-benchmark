@@ -45,3 +45,5 @@ CohereLabs/command-a-plus-05-2026-fp8,Command A+ 05-2026,Cohere,219B,FP8,2250062
 mistralai/Mistral-Small-4-119B-2603,Mistral Small 4 119B 2603,Mistral AI,119B,FP8,120922973936
 Qwen/Qwen3.8-Flash-Next-FP8,Qwen3.8 Flash Next,Alibaba Cloud,180B,FP8,185523317458
 tencent/Hy3-FP8,Hy3,Tencent,299B,FP8,299889838946
+anthropic/claude-haiku-4.5,Claude Haiku 4.5,Anthropic,,,
+tencent/hy4-preview,Hy4 Preview,Tencent,,,

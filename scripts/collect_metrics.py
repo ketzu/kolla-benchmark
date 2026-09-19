@@ -6,14 +6,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import model_info  # noqa: E402
 
 
 COLUMNS = [
     "model",
+    *model_info.COLUMNS,
     "precision",
     "recall",
     "f05",
@@ -48,17 +52,6 @@ DETAIL_COLUMNS = [
     "file_bytes",
 ]
 
-# Columns that cannot be read from a result and come from the hand maintained model list.
-MODEL_INFO_COLUMNS = ["display_name", "company", "params", "quantization", "file_bytes"]
-
-PROVIDERS = {
-    "openrouter.ai": "OpenRouter",
-    "localhost": "Local",
-    "127.0.0.1": "Local",
-    "::1": "Local",
-    "vast.local": "Vast.ai",
-}
-
 # Written by the vast.ai runner next to a run: GPU, timings and cost of that run.
 SIDECAR_SUFFIX = ".vast.json"
 
@@ -83,15 +76,6 @@ def _load_costs(cost_file: Path) -> dict[str, str]:
         }
 
 
-def _load_model_info(model_info_file: Path) -> dict[str, dict[str, str]]:
-    if not model_info_file.is_file():
-        return {}
-
-    with model_info_file.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        return {row["model"]: row for row in reader if row.get("model")}
-
-
 def _results(results_dir: Path) -> Iterator[tuple[Path, Mapping[str, Any], Mapping[str, Any]]]:
     """Yield ``(path, payload, provenance)`` for every JSON result below ``results_dir``."""
     for result_file in sorted(results_dir.rglob("*.json")):
@@ -114,11 +98,6 @@ def _sidecar_cost(result_file: Path) -> str | None:
     with sidecar.open(encoding="utf-8") as handle:
         cost = json.load(handle).get("cost_usd")
     return None if cost is None else str(cost)
-
-
-def _provider(endpoint: str) -> str:
-    host = urlparse(endpoint).hostname or ""
-    return PROVIDERS.get(host, host)
 
 
 def _outcomes(payload: Mapping[str, Any]) -> dict[str, int]:
@@ -148,9 +127,12 @@ def _outcomes(payload: Mapping[str, Any]) -> dict[str, int]:
     return outcomes
 
 
-def collect_rows(results_dir: Path, cost_file: Path) -> list[dict[str, Any]]:
+def collect_rows(
+    results_dir: Path, cost_file: Path, model_info_file: Path
+) -> list[dict[str, Any]]:
     """Return one flattened row for every JSON result below ``results_dir``."""
     costs = _load_costs(cost_file)
+    models = model_info.load(model_info_file)
     rows: list[dict[str, Any]] = []
 
     for result_file, payload, provenance in _results(results_dir):
@@ -166,6 +148,7 @@ def collect_rows(results_dir: Path, cost_file: Path) -> list[dict[str, Any]]:
         rows.append(
             {
                 "model": model,
+                **model_info.describe(provenance, models),
                 "precision": _section_value(payload, "metrics", "precision"),
                 "recall": _section_value(payload, "metrics", "recall"),
                 "f05": _section_value(payload, "metrics", "f05"),
@@ -192,19 +175,19 @@ def collect_details(results_dir: Path, model_info_file: Path) -> list[dict[str, 
 
     Models missing from ``model_info_file`` keep their descriptive columns empty.
     """
-    model_info = _load_model_info(model_info_file)
+    models = model_info.load(model_info_file)
     rows: list[dict[str, Any]] = []
 
     for result_file, payload, provenance in _results(results_dir):
         model = provenance["model"]
         endpoint = provenance.get("endpoint") or ""
-        info = model_info.get(model, {})
+        info = models.get(model, {})
 
         rows.append(
             {
                 "model": model,
-                **{column: info.get(column) or "" for column in MODEL_INFO_COLUMNS},
-                "provider": _provider(endpoint),
+                **{column: info.get(column) or "" for column in model_info.FILE_COLUMNS},
+                "provider": model_info.provider(endpoint),
                 "endpoint": endpoint,
                 "started_at": provenance.get("started") or "",
                 "rescored_at": provenance.get("rescored") or "",
@@ -270,7 +253,7 @@ def main() -> None:
     output = args.output or args.results_dir / "metrics.csv"
     details_output = args.details_output or args.results_dir / "run-details.csv"
 
-    rows = collect_rows(args.results_dir, cost_file)
+    rows = collect_rows(args.results_dir, cost_file, args.model_info)
     write_report(output, rows)
     print(f"wrote {len(rows)} rows to {output}")
 

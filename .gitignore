@@ -29,6 +29,7 @@ data/*.csv
 results/
 other-results/
 multiprompt-results/
+iterate-results/
 pre-rescore/
 **/*.pyc
 **/__pycache__/

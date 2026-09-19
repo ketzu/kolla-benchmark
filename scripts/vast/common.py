@@ -37,8 +37,13 @@ RUNNER_FILES = ("onstart.sh", "runner.py", "common.py")
 # The runner sets these for every model, a batch may not.
 RUNNER_OWNED_FLAGS = ("--model", "-m", "--url", "-u", "--api-key", "--output", "-o")
 SIDECAR_SUFFIX = ".vast.json"
-# The benchmark's --prompt default, see src/openai.rs.
-DEFAULT_PROMPT = "Correct the Korean sentence. Reply with the corrected sentence only."
+# The benchmark's prompt defaults, see src/config.rs and src/openai.rs.
+SENTENCE_PLACEHOLDER = "{sentence}"
+DEFAULT_SYSTEM = "Correct the Korean sentence. Reply with the corrected sentence only."
+EXTENDED_PROMPT = (
+    "Correct the following korean sentence. Only correct actual errors. "
+    "Reply with only the corrected sentence. {sentence}"
+)
 # Only found in an answer when the server did not split the reasoning off.
 REASONING_MARKERS = (
     "<think>", "</think>",
@@ -112,15 +117,31 @@ def check_benchmark_args(args: Iterable[str]) -> None:
                 raise ValueError(f"{arg} is set by the runner for every model")
 
 
-def benchmark_prompt(args: Iterable[str]) -> str:
-    """The prompt a run uses: --prompt among the benchmark arguments, or the default."""
-    args = list(args)
+def _flag_value(args: list[str], flag: str) -> str | None:
     for index, arg in enumerate(args):
-        if arg == "--prompt" and index + 1 < len(args):
+        if arg == flag and index + 1 < len(args):
             return args[index + 1]
-        if arg.startswith("--prompt="):
+        if arg.startswith(flag + "="):
             return arg.split("=", 1)[1]
-    return DEFAULT_PROMPT
+    return None
+
+
+def benchmark_messages(args: Iterable[str], sentence: str) -> list[dict[str, str]]:
+    """The chat messages a run with these benchmark arguments sends for ``sentence``.
+
+    Mirrors the benchmark: a plain run sends the original system prompt and the bare sentence;
+    --prompt or --iterate drop that system prompt unless --system is given too.
+    """
+    args = list(args)
+    system = _flag_value(args, "--system")
+    prompt = _flag_value(args, "--prompt")
+    iterate = "--iterate" in args
+    if system is None and prompt is None and not iterate:
+        system = DEFAULT_SYSTEM
+    if prompt is None:
+        prompt = EXTENDED_PROMPT if iterate else SENTENCE_PLACEHOLDER
+    user = {"role": "user", "content": prompt.replace(SENTENCE_PLACEHOLDER, sentence)}
+    return ([{"role": "system", "content": system}] if system is not None else []) + [user]
 
 
 def leaked_reasoning(answer: str) -> str | None:
