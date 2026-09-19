@@ -5,6 +5,7 @@
 """Benchmark self-hosted models on rented vast.ai GPUs.
 
     uv run scripts/vast/vast_bench.py launch --models scripts/vllm.txt --gpu 'gpu_ram>=80 num_gpus=1' -- --limit 0 --concurrency 32
+    uv run scripts/vast/vast_bench.py launch --models scripts/vllm.txt --prompts scripts/prompts.json -- --limit 0
     uv run scripts/vast/vast_bench.py status [BATCH]
     uv run scripts/vast/vast_bench.py pull [BATCH] [--logs]
     uv run scripts/vast/vast_bench.py destroy [BATCH]
@@ -12,7 +13,8 @@
 launch rents one instance for the batch and returns once it has booted. The instance serves
 every model with vLLM, benchmarks it, uploads the run to the S3 bucket and destroys itself
 when the list is done or the deadline passes; this machine can go offline in the meantime.
-Everything after -- is passed on to the benchmark.
+Everything after -- is passed on to the benchmark. With --prompts every model is benchmarked
+once per prompt of the list while it is served, and pull puts the runs into multiprompt-results/.
 
 Credentials come from the environment or .env in the repository root: VAST_API_KEY,
 S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT (unless AWS), optional
@@ -45,6 +47,7 @@ from common import (
     Storage,
     check_benchmark_args,
     key,
+    load_prompts,
     manifest_models,
     new_batch_id,
     parse_duration,
@@ -115,6 +118,10 @@ def offer_query(gpu_filter: str, disk: int, max_dph: float | None) -> dict[str, 
     return query
 
 
+class VastError(SystemExit):
+    """A vast.ai call that failed; ends the program with its message unless it is handled."""
+
+
 class VastClient:
     """The few vast.ai REST calls a batch needs."""
 
@@ -133,7 +140,7 @@ class VastClient:
                 return json.loads(response.read() or b"{}")
         except urllib.error.HTTPError as error:
             detail = error.read().decode(errors="replace")
-            raise SystemExit(f"vast.ai {method} {path} failed with {error.code}: {detail}") from error
+            raise VastError(f"vast.ai {method} {path} failed with {error.code}: {detail}") from error
 
     def search_offers(self, query: Mapping[str, Any]) -> list[dict[str, Any]]:
         return self._request("POST", "/bundles/", query)["offers"]
@@ -141,7 +148,7 @@ class VastClient:
     def create_instance(self, offer_id: int, body: Mapping[str, Any]) -> int:
         response = self._request("PUT", f"/asks/{offer_id}/", body)
         if not response.get("success"):
-            raise SystemExit(f"vast.ai refused offer {offer_id}: {response}")
+            raise VastError(f"vast.ai refused offer {offer_id}: {response}")
         return int(response["new_contract"])
 
     def instances(self) -> list[dict[str, Any]]:
@@ -272,7 +279,9 @@ def launch(
     if not entries:
         raise SystemExit(f"no models listed in {options.models}")
     try:
-        check_benchmark_args(benchmark_args)
+        # Checked here, so that a broken prompt does not surface only on the rented instance.
+        prompts = load_prompts(Path(options.prompts).read_text(encoding="utf-8")) if options.prompts else []
+        check_benchmark_args(benchmark_args, prompts=bool(prompts))
         deadline_seconds = parse_duration(options.deadline)
         boot_seconds = parse_duration(options.boot_timeout)
         query = offer_query(options.gpu, options.disk, options.max_dph)
@@ -288,7 +297,9 @@ def launch(
     commit, dirty, source = bundle()
     storage.put_bytes(key(batch, "source.tar.gz"), source)
     for name in RUNNER_FILES:
-        storage.put_file(key(batch, name), HERE / name)
+        # A Windows checkout may have turned the line ends into CRLF, which bash on the instance
+        # cannot run.
+        storage.put_bytes(key(batch, name), (HERE / name).read_bytes().replace(b"\r\n", b"\n"))
     manifest = {
         "batch": batch,
         "created_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -299,16 +310,23 @@ def launch(
         "deadline_seconds": deadline_seconds,
         "models": manifest_models(entries),
         "benchmark_args": benchmark_args,
+        "prompts": prompts,
         "pip": list(options.pip),
     }
     storage.put_bytes(key(batch, "batch.json"), json.dumps(manifest, indent=2).encode())
-    print(f"batch {batch}: {len(entries)} models, commit {commit[:12]}{' with local changes' if dirty else ''}")
+    runs = f"{len(entries)} models" + (f" x {len(prompts)} prompts" if prompts else "")
+    print(f"batch {batch}: {runs}, commit {commit[:12]}{' with local changes' if dirty else ''}")
 
     onstart = onstart_command(storage, batch, min(deadline_seconds + 3600, MAX_PRESIGN_SECONDS))
     for offer in offers:
         deadline_at = int(started.timestamp()) + deadline_seconds
         body = instance_request(batch, offer, env, onstart, deadline_at, options.disk, options.image)
-        instance_id = vast.create_instance(offer["id"], body)
+        try:
+            instance_id = vast.create_instance(offer["id"], body)
+        except VastError as error:
+            # The search keeps listing some offers that can no longer be rented.
+            print(f"  could not rent offer {offer['id']}, trying the next offer: {error}")
+            continue
         print(
             f"rented instance {instance_id}: {offer.get('num_gpus')}x {offer.get('gpu_name')} "
             f"at ${offer.get('dph_total', 0):.3f}/h"
@@ -342,6 +360,16 @@ def show_status(storage: Storage, batch: str, now: datetime) -> None:
         f05 = f"{record['f05']:.4f}" if record.get("f05") is not None else ""
         error = (record.get("error") or "").splitlines()
         print(f"{record['model']:<50} {record['state']:<13} {f05:>7}  {error[0] if error else ''}")
+        for label, run in (record.get("runs") or {}).items():
+            f05 = f"{run['f05']:.4f}" if run.get("f05") is not None else ""
+            error = (run.get("error") or "").splitlines()
+            print(f"  {label:<62} {f05:>7}  {error[0] if error else ''}")
+
+
+def default_results_dir(manifest: Mapping[str, Any] | None) -> Path:
+    """Prompt matrix runs stay out of results/, where collect_metrics would count them."""
+    prompts = (manifest or {}).get("prompts")
+    return REPOSITORY / ("multiprompt-results" if prompts else "results")
 
 
 def pull(storage: Storage, batch: str, destination: Path, logs: bool) -> int:
@@ -381,6 +409,10 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("launch", help="rent an instance and start a batch")
     start.add_argument("--models", required=True, help="model list: a Hugging Face repo per line, vllm flags after it")
+    start.add_argument(
+        "--prompts",
+        help="prompt list like scripts/prompts.json; every model runs every prompt while it is served",
+    )
     start.add_argument("--gpu", default="", help="vast.ai offer filter, e.g. 'gpu_ram>=80 num_gpus=1'")
     start.add_argument("--max-dph", type=float, help="most $/hour to pay for the instance")
     start.add_argument("--disk", type=int, default=200, help="disk in GB, room for the largest model (default 200)")
@@ -401,7 +433,11 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     fetch = commands.add_parser("pull", help="download the results of a batch into results/<batch>/")
     fetch.add_argument("batch", nargs="?")
     fetch.add_argument("--logs", action="store_true", help="also download the logs")
-    fetch.add_argument("--results-dir", type=Path, default=REPOSITORY / "results")
+    fetch.add_argument(
+        "--results-dir",
+        type=Path,
+        help="where to put <batch>/ (default: results/, multiprompt-results/ for a batch with --prompts)",
+    )
 
     options = parser.parse_args(argv)
     if benchmark_args and options.command != "launch":
@@ -435,8 +471,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if options.command == "status":
         show_status(storage, batch, datetime.now(timezone.utc))
     elif options.command == "pull":
-        fetched = pull(storage, batch, options.results_dir, options.logs)
-        print(f"fetched {fetched} files into {options.results_dir / batch}")
+        results_dir = options.results_dir or default_results_dir(read_json(storage, key(batch, "batch.json")))
+        fetched = pull(storage, batch, results_dir, options.logs)
+        print(f"fetched {fetched} files into {results_dir / batch}")
     elif options.command == "destroy":
         destroy(vast, batch)
     return 0

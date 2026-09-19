@@ -38,8 +38,19 @@ class FakeProcess:
 class FakeSystem:
     """vLLM starts at once and answers unless told otherwise; a benchmark takes 100 s."""
 
-    def __init__(self, crashing=(), never_ready=(), failing_benchmark=(), leaking_probe=(), leaking_answers=()):
+    def __init__(
+        self,
+        crashing=(),
+        never_ready=(),
+        failing_benchmark=(),
+        leaking_probe=(),
+        leaking_answers=(),
+        failing_prompts=(),
+        startup_seconds=0,
+    ):
         self.crashing = crashing
+        self.failing_prompts = failing_prompts
+        self.startup_seconds = startup_seconds
         self.never_ready = never_ready
         self.failing_benchmark = failing_benchmark
         self.leaking_probe = leaking_probe
@@ -55,6 +66,7 @@ class FakeSystem:
     def start(self, command, log):
         self.current = command[2]
         self.started.append(self.current)
+        self.now += self.startup_seconds
         log.write_text("loading weights\n", encoding="utf-8")
         return FakeProcess(1 if self.current in self.crashing else None)
 
@@ -68,7 +80,8 @@ class FakeSystem:
         self.benchmarks.append(command)
         self.now += 100
         model = command[command.index("--model") + 1]
-        if model in self.failing_benchmark:
+        prompt = command[command.index("--prompt") + 1] if "--prompt" in command else None
+        if model in self.failing_benchmark or prompt in self.failing_prompts:
             log.write_text("endpoint kept failing\n", encoding="utf-8")
             return 1
         log.write_text(f"Evaluating {model}\n", encoding="utf-8")
@@ -101,7 +114,7 @@ class FakeSystem:
 MODELS = ("a/one", "b/two")
 
 
-class RunnerTests(unittest.TestCase):
+class RunnerCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.work = Path(self.temp.name)
@@ -109,13 +122,15 @@ class RunnerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def make_runner(self, system, storage=None, status=None):
+    def make_runner(self, system, storage=None, status=None, prompts=None):
         manifest = {
             "batch": "B",
             "image": "vllm/vllm-openai:test",
             "models": [{"model": model, "vllm_args": []} for model in MODELS],
             "benchmark_args": ["--limit", "0"],
         }
+        if prompts is not None:
+            manifest["prompts"] = prompts
         if status is None:
             status = common.new_status("B", MODELS)
         status.update(instance_id=7, gpu_name="H100", num_gpus=1, dph=3.6)
@@ -128,6 +143,8 @@ class RunnerTests(unittest.TestCase):
     def states(self, storage):
         return {record["model"]: record["state"] for record in self.stored_status(storage)["models"]}
 
+
+class RunnerTests(RunnerCase):
     def test_runs_every_model_and_uploads_runs_sidecars_and_logs(self):
         system = FakeSystem()
         batch_runner, storage = self.make_runner(system)
@@ -251,6 +268,94 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(system.started, ["b/two"])
         record = self.stored_status(storage)["models"][0]
         self.assertEqual((record["state"], record["error"]), ("failed", "interrupted 2 times"))
+
+
+PROMPTS = [
+    {"name": "plain", "user": "Fix: {sentence}"},
+    {"name": "chat", "system": "Be brief.", "user": "{sentence}"},
+]
+
+
+class PromptBatchTests(RunnerCase):
+    def test_serves_each_model_once_and_runs_every_prompt(self):
+        system = FakeSystem(startup_seconds=200)
+        batch_runner, storage = self.make_runner(system, prompts=PROMPTS)
+
+        self.assertEqual(batch_runner.run(), "finished")
+
+        self.assertEqual(system.started, list(MODELS))
+        self.assertEqual(len(system.benchmarks), 4)
+        first, second = system.benchmarks[:2]
+        self.assertEqual(first[first.index("--prompt") + 1], "Fix: {sentence}")
+        self.assertNotIn("--system", first)
+        self.assertEqual(second[second.index("--system") + 1], "Be brief.")
+        self.assertEqual(first[-2:], ["--limit", "0"])
+        # One probe per model, sent the way the first prompt is.
+        self.assertEqual(system.probes[0], ("a/one", [{"role": "user", "content": "Fix: " + runner.PROBE_SENTENCE}]))
+        self.assertEqual(len(system.probes), 2)
+        for name in ("a_one/p1.json", "a_one/p1.vast.json", "a_one/p2.json", "b_two/p2.vast.json"):
+            self.assertIn(f"kolla/B/results/{name}", storage.objects)
+        self.assertNotIn("kolla/B/results/a_one.json", storage.objects)
+        # The 200 s startup is split between the two runs of the model.
+        sidecar = json.loads(storage.objects["kolla/B/results/a_one/p2.vast.json"])
+        self.assertEqual((sidecar["startup_seconds"], sidecar["cost_usd"]), (100.0, 0.2))
+        record = self.stored_status(storage)["models"][0]
+        self.assertEqual(record["state"], "done")
+        self.assertEqual(
+            record["runs"],
+            {
+                "p1 plain/user": {"f05": 0.5, "error": None},
+                "p2 chat/system+user": {"f05": 0.5, "error": None},
+            },
+        )
+
+    def test_a_failing_prompt_does_not_stop_the_others(self):
+        system = FakeSystem(failing_prompts=("Fix: {sentence}",))
+        batch_runner, storage = self.make_runner(system, prompts=PROMPTS)
+
+        batch_runner.run()
+
+        record = self.stored_status(storage)["models"][0]
+        self.assertEqual(record["state"], "failed")
+        self.assertIn("1 of 2 prompts failed", record["error"])
+        self.assertIn("p1 plain/user: benchmark exited with 1", record["error"])
+        self.assertEqual(record["runs"]["p2 chat/system+user"]["f05"], 0.5)
+        self.assertIn("kolla/B/results/a_one/p2.json", storage.objects)
+        self.assertNotIn("kolla/B/results/a_one/p1.json", storage.objects)
+        self.assertEqual(self.states(storage)["b/two"], "failed")
+        self.assertEqual(len(system.benchmarks), 4)
+
+    def test_rejected_prompt_runs_are_kept_per_model(self):
+        system = FakeSystem(leaking_answers=MODELS)
+        batch_runner, storage = self.make_runner(system, prompts=PROMPTS)
+
+        batch_runner.run()
+
+        for name in ("a_one/p1", "a_one/p2", "b_two/p1"):
+            self.assertIn(f"kolla/B/logs/{name}.rejected.json", storage.objects)
+        self.assertIn("kolla/B/logs/a_one.vllm.log", storage.objects)
+        self.assertIn("2 of 2 prompts failed", self.stored_status(storage)["models"][0]["error"])
+
+    def test_resumes_with_the_prompts_not_finished_yet(self):
+        status = common.new_status("B", MODELS)
+        status["models"][0].update(state="benchmarking", attempts=1, runs={"p1 plain/user": {"f05": 0.4, "error": None}})
+        status["models"][1].update(
+            state="benchmarking",
+            attempts=1,
+            runs={label: {"f05": 0.3, "error": None} for label in ("p1 plain/user", "p2 chat/system+user")},
+        )
+        system = FakeSystem()
+        batch_runner, storage = self.make_runner(system, status=status, prompts=PROMPTS)
+
+        batch_runner.run()
+
+        # b/two finished both prompts before the restart and is not served again.
+        self.assertEqual(system.started, ["a/one"])
+        self.assertEqual(len(system.benchmarks), 1)
+        self.assertIn("--system", system.benchmarks[0])
+        records = self.stored_status(storage)["models"]
+        self.assertEqual(records[0]["runs"]["p1 plain/user"]["f05"], 0.4)
+        self.assertEqual(self.states(storage), {"a/one": "done", "b/two": "done"})
 
 
 class InstallPackagesTests(unittest.TestCase):

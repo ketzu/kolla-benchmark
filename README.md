@@ -119,9 +119,9 @@ uv run scripts/vast/vast_bench.py destroy
 
 | Command | Description |
 |---|---|
-| `launch` | Rent the cheapest offer matching `--gpu` (vast.ai filter syntax, `gpu_ram` in GB), `--disk` (200 GB) and `--max-dph`, then start the batch. Offers that do not boot within `--boot-timeout` (30m) are destroyed and the next is tried. `--deadline` (12h) destroys the instance no matter what. `--pip PACKAGE` (repeatable) installs extra Python packages on the instance before serving, e.g. `cohere-melody` for Cohere's reasoning parser. Everything after `--` goes to the benchmark. |
+| `launch` | Rent the cheapest offer matching `--gpu` (vast.ai filter syntax, `gpu_ram` in GB), `--disk` (200 GB) and `--max-dph`, then start the batch. Offers that do not boot within `--boot-timeout` (30m) are destroyed and the next is tried. `--deadline` (12h) destroys the instance no matter what. `--pip PACKAGE` (repeatable) installs extra Python packages on the instance before serving, e.g. `cohere-melody` for Cohere's reasoning parser. `--prompts FILE` runs every prompt of a prompt list against each model, see below. Everything after `--` goes to the benchmark. |
 | `status [BATCH]` | Phase, GPU, cost so far, last heartbeat, and the state and F0.5 of every model. |
-| `pull [BATCH]` | Download the runs into `results/<batch>/`; `--logs` also fetches the vLLM and benchmark logs. |
+| `pull [BATCH]` | Download the runs into `results/<batch>/` (`multiprompt-results/<batch>/` for a batch with `--prompts`); `--logs` also fetches the vLLM and benchmark logs. |
 | `destroy [BATCH]` | Destroy the batch's instance by hand. |
 
 `BATCH` defaults to the latest batch in the bucket. The benchmark is built on the instance
@@ -130,6 +130,23 @@ cannot load or that fails the benchmark is marked failed and the batch continues
 gets a `<model>.vast.json` next to it with GPU, vLLM version, timings, and the GPU cost of
 that run; `collect_metrics.py` reports these runs with provider `Vast.ai` and takes their
 cost from it unless `results/cost.csv` has one.
+
+The [multi-prompt experiment](#multi-prompt-experiment) runs on vast.ai with `--prompts`. Each
+model is served once and benchmarked once per prompt before the next model loads, so a prompt
+list costs one model download and startup per model, not one per prompt:
+
+```bash
+uv run scripts/vast/vast_bench.py launch --models scripts/vllm-1gpu.txt --prompts scripts/prompts.json --gpu 'gpu_ram>=80 num_gpus=1' --max-dph 3 --deadline 24h -- --limit 0 --concurrency 32
+```
+
+The prompt list is checked before anything is rented, and `--prompt`/`--system` cannot be passed
+after `--` with it. Runs are named like those of `run-models.sh`: `<model>/p1.json` to `pN.json`,
+each with its own `.vast.json` that carries an equal share of the model's startup. A prompt that
+fails is reported and the remaining prompts still run; after a restart only the prompts not
+finished yet run again. `status` lists the F0.5 of every prompt below its model, and `pull` puts
+such a batch into `multiprompt-results/<batch>/` unless `--results-dir` says otherwise, where
+`collect_prompt_metrics.py` picks it up. Allow for the longer batch in `--deadline`: every model
+now runs the whole corpus once per prompt.
 
 Both this script and the multi-prompt collector describe each run's model next to its id.
 `provider` comes from the run's endpoint (`OpenRouter`, `Local` for localhost, `Vast.ai`, or

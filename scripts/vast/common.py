@@ -108,13 +108,48 @@ def vllm_command(entry: ModelEntry, gpu_count: int) -> list[str]:
     ]  # fmt: skip
 
 
-def check_benchmark_args(args: Iterable[str]) -> None:
-    """Refuse benchmark flags the runner sets itself."""
+def check_benchmark_args(args: Iterable[str], prompts: bool = False) -> None:
+    """Refuse benchmark flags the runner sets itself, and with a prompt list the prompt flags."""
+    args = list(args)
     for arg in args:
         for flag in RUNNER_OWNED_FLAGS:
             long_form = flag.startswith("--")
             if arg == flag or arg.startswith(flag + "=") or (not long_form and arg.startswith(flag)):
                 raise ValueError(f"{arg} is set by the runner for every model")
+    if prompts and _has_flag(args, "--prompt", "--system"):
+        raise ValueError("--prompt and --system cannot be combined with --prompts")
+
+
+def load_prompts(text: str) -> list[dict[str, str]]:
+    """Read a prompt list like scripts/prompts.json: a non-empty array of objects with a
+    ``user`` template containing {sentence}, an optional ``system`` prompt and ``name``."""
+    prompts = json.loads(text)
+    problem = "must be a non-empty array of {\"name\"?: ..., \"user\": ..., \"system\"?: ...}"
+    if not isinstance(prompts, list) or not prompts:
+        raise ValueError(f"the prompt list {problem}")
+    for number, prompt in enumerate(prompts, 1):
+        if not isinstance(prompt, dict) or not isinstance(prompt.get("user"), str):
+            raise ValueError(f"prompt {number} {problem}")
+        if SENTENCE_PLACEHOLDER not in prompt["user"]:
+            raise ValueError(f"prompt {number} has no {SENTENCE_PLACEHOLDER} in its user template")
+        if any(not isinstance(prompt[field], str) for field in ("system", "name") if field in prompt):
+            raise ValueError(f"prompt {number} {problem}")
+    return [
+        {field: prompt[field] for field in ("name", "system", "user") if field in prompt}
+        for prompt in prompts
+    ]
+
+
+def prompt_args(prompt: Mapping[str, str]) -> list[str]:
+    """The benchmark arguments that send one prompt of a prompt list."""
+    system = ["--system", prompt["system"]] if "system" in prompt else []
+    return [*system, "--prompt", prompt["user"]]
+
+
+def prompt_label(number: int, prompt: Mapping[str, str]) -> str:
+    """A prompt as scripts/run-models.sh names it, e.g. ``p3 korean/user``."""
+    layout = "system+user" if "system" in prompt else "user"
+    return f"p{number} {prompt.get('name', 'unnamed')}/{layout}"
 
 
 def _flag_value(args: list[str], flag: str) -> str | None:

@@ -24,6 +24,22 @@ class CollectPromptMetricsTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_skips_the_vast_sidecars_next_to_the_runs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prompt_file = root / "prompts.json"
+            prompt_file.write_text(json.dumps(PROMPTS), encoding="utf-8")
+            run = {
+                "provenance": {"model": "Qwen/remote", "endpoint": "http://vast.local:8000/v1", "prompt": "Correct it. {sentence}"},
+                "metrics": {"f05": 0.5},
+            }
+            self.write_json(root / "results" / "B" / "Qwen_remote" / "p1.json", run)
+            self.write_json(root / "results" / "B" / "Qwen_remote" / "p1.vast.json", {"cost_usd": 0.1})
+
+            rows = collect_rows(root / "results", prompt_file, root / "missing.csv")
+
+            self.assertEqual([(row["model"], row["provider"], row["prompt_name"]) for row in rows], [("Qwen/remote", "Vast.ai", "simple")])
+
     def test_flattens_a_run_with_its_prompt_variant(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

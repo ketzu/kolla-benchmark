@@ -100,7 +100,7 @@ def collect_rows(
     models = model_info.load(model_info_file)
     rows: list[dict[str, Any]] = []
 
-    for result_file in sorted(results_dir.rglob("*.json")):
+    for result_file in model_info.run_files(results_dir):
         with result_file.open(encoding="utf-8") as handle:
             payload = json.load(handle)
 

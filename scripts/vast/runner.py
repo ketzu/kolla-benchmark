@@ -28,7 +28,7 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from common import (
     ENDPOINT,
@@ -44,6 +44,8 @@ from common import (
     leaked_reasoning,
     manifest_entries,
     new_status,
+    prompt_args,
+    prompt_label,
     read_json,
     safe_name,
     utc_now,
@@ -65,6 +67,15 @@ PROBE_TIMEOUT_SECONDS = 600
 
 class ModelFailed(Exception):
     """A model could not be served or benchmarked; the message explains why."""
+
+
+class BenchmarkRun(NamedTuple):
+    """One benchmark of a served model: its prompt, its path below results/ and logs/ without
+    the suffix, and the benchmark arguments it adds to the batch's."""
+
+    label: str | None
+    stem: str
+    args: list[str]
 
 
 def tail(path: Path, lines: int = LOG_TAIL_LINES) -> str:
@@ -204,20 +215,31 @@ class Runner:
         self.save()
         return self.status["phase"]
 
+    def runs(self, model: str) -> list[BenchmarkRun]:
+        """Every benchmark a served model gets: one, or one per prompt of the batch."""
+        safe = safe_name(model)
+        prompts = self.manifest.get("prompts") or []
+        if not prompts:
+            return [BenchmarkRun(None, safe, [])]
+        return [
+            BenchmarkRun(prompt_label(number, prompt), f"{safe}/p{number}", prompt_args(prompt))
+            for number, prompt in enumerate(prompts, 1)
+        ]
+
     def run_model(self, entry: ModelEntry, record: dict[str, Any]) -> None:
         model = entry.model
         safe = safe_name(model)
         logs = self.work / "logs"
-        results = self.work / "results"
         logs.mkdir(parents=True, exist_ok=True)
-        results.mkdir(parents=True, exist_ok=True)
         vllm_log = logs / f"{safe}.vllm.log"
         bench_log = logs / f"{safe}.bench.log"
-        result = results / f"{safe}.json"
-        sidecar = results / f"{safe}{SIDECAR_SUFFIX}"
-        rejected = logs / f"{safe}.rejected.json"
-        result.unlink(missing_ok=True)
-        rejected.unlink(missing_ok=True)
+        runs = self.runs(model)
+        # Prompts finished before a restart are uploaded already; only the rest run again.
+        finished = {label for label, run in (record.get("runs") or {}).items() if run.get("f05") is not None}
+        pending = [run for run in runs if run.label not in finished]
+        if not pending:
+            self._update(record, state="done", finished_at=utc_now())
+            return
 
         say(f"=== {model} ===")
         self._update(
@@ -231,6 +253,7 @@ class Runner:
         )
         command = vllm_command(entry, self.status.get("num_gpus") or 1)
         server = None
+        rejected: list[Path] = []
         try:
             started = self.system.monotonic()
             server = self.system.start(command, vllm_log)
@@ -240,7 +263,7 @@ class Runner:
             startup_seconds = self.system.monotonic() - started
 
             # Without the right --reasoning-parser the think block is scored as the correction.
-            messages = benchmark_messages(self.manifest["benchmark_args"], PROBE_SENTENCE)
+            messages = benchmark_messages([*self.manifest["benchmark_args"], *pending[0].args], PROBE_SENTENCE)
             answer = self.system.probe(model, messages)
             marker = leaked_reasoning(answer)
             if marker:
@@ -250,29 +273,28 @@ class Runner:
                 )
 
             self._update(record, state="benchmarking")
-            started = self.system.monotonic()
-            code = self.system.run(self._benchmark_command(model, result), bench_log, self.work / "source")
-            benchmark_seconds = self.system.monotonic() - started
-            if code != 0 or not result.is_file():
-                raise ModelFailed(f"benchmark exited with {code}\n{tail(bench_log)}")
-
-            run = json.loads(result.read_text(encoding="utf-8"))
-            answers = [item.get("answer") or "" for item in run.get("results", [])]
-            leaked = [marker for marker in map(leaked_reasoning, answers) if marker]
-            if leaked:
-                # Kept for a look, but out of results/ where collect_metrics would count it.
-                result.replace(rejected)
-                raise ModelFailed(
-                    f"{len(leaked)} of {len(answers)} answers contain {leaked[0]}: "
-                    f"set --reasoning-parser for this model; the run is kept as logs/{rejected.name}"
-                )
-            f05 = run["metrics"]["f05"]
-            facts = self._sidecar(model, command, startup_seconds, benchmark_seconds)
-            sidecar.write_text(json.dumps(facts, indent=2), encoding="utf-8")
-            for path in (result, sidecar):
-                self.storage.put_file(key(self.batch, "results", path.name), path)
-            self._update(record, state="done", f05=f05, finished_at=utc_now())
-            say(f"{model}: F0.5 {f05:.4f}")
+            # The server started once for the pending runs, so each carries an equal share of it.
+            startup_share = startup_seconds / len(pending)
+            errors = []
+            for run in pending:
+                try:
+                    f05 = self._benchmark(model, run, bench_log, rejected, command, startup_share)
+                except Exception as error:  # One prompt failing must not stop the others.
+                    message = str(error) if isinstance(error, ModelFailed) else f"{type(error).__name__}: {error}"
+                    if run.label is None:
+                        raise ModelFailed(message) from error
+                    say(f"{model}, {run.label} failed: {message}")
+                    errors.append(f"{run.label}: {message}")
+                    self._record_run(record, run, error=message)
+                    continue
+                say(f"{model}{'' if run.label is None else ', ' + run.label}: F0.5 {f05:.4f}")
+                if run.label is None:
+                    self._update(record, f05=f05)
+                else:
+                    self._record_run(record, run, f05=f05)
+            if errors:
+                raise ModelFailed(f"{len(errors)} of {len(runs)} prompts failed\n" + "\n".join(errors))
+            self._update(record, state="done", finished_at=utc_now())
         except Exception as error:  # One model failing must not stop the batch.
             message = str(error) if isinstance(error, ModelFailed) else f"{type(error).__name__}: {error}"
             say(f"{model} failed: {message}")
@@ -281,15 +303,61 @@ class Runner:
             if server is not None:
                 self.system.stop(server)
             self.system.remove_model_cache(model)
-            self._upload_logs(vllm_log, bench_log, rejected)
+            self._upload_logs(vllm_log, bench_log, *rejected)
 
-    def _benchmark_command(self, model: str, result: Path) -> list[str]:
+    def _benchmark(
+        self,
+        model: str,
+        run: BenchmarkRun,
+        bench_log: Path,
+        rejected: list[Path],
+        command: list[str],
+        startup_seconds: float,
+    ) -> float:
+        """Benchmark the served model once and upload the run; return its F0.5."""
+        result = self.work / "results" / f"{run.stem}.json"
+        sidecar = self.work / "results" / f"{run.stem}{SIDECAR_SUFFIX}"
+        kept = self.work / "logs" / f"{run.stem}.rejected.json"
+        for path in (result, kept):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.unlink(missing_ok=True)
+
+        started = self.system.monotonic()
+        code = self.system.run(self._benchmark_command(model, result, run.args), bench_log, self.work / "source")
+        benchmark_seconds = self.system.monotonic() - started
+        if code != 0 or not result.is_file():
+            raise ModelFailed(f"benchmark exited with {code}\n{tail(bench_log)}")
+
+        outcome = json.loads(result.read_text(encoding="utf-8"))
+        answers = [item.get("answer") or "" for item in outcome.get("results", [])]
+        leaked = [marker for marker in map(leaked_reasoning, answers) if marker]
+        if leaked:
+            # Kept for a look, but out of results/ where collect_metrics would count it.
+            result.replace(kept)
+            rejected.append(kept)
+            raise ModelFailed(
+                f"{len(leaked)} of {len(answers)} answers contain {leaked[0]}: "
+                f"set --reasoning-parser for this model; the run is kept as logs/{run.stem}.rejected.json"
+            )
+        facts = self._sidecar(model, command, startup_seconds, benchmark_seconds)
+        sidecar.write_text(json.dumps(facts, indent=2), encoding="utf-8")
+        for path, name in ((result, f"{run.stem}.json"), (sidecar, f"{run.stem}{SIDECAR_SUFFIX}")):
+            self.storage.put_file(key(self.batch, "results", name), path)
+        return outcome["metrics"]["f05"]
+
+    def _record_run(self, record: dict[str, Any], run: BenchmarkRun, **outcome: Any) -> None:
+        runs = dict(record.get("runs") or {})
+        runs[run.label] = {"f05": None, "error": None, **outcome}
+        self._update(record, runs=runs)
+
+    def _benchmark_command(self, model: str, result: Path, run_args: Sequence[str] = ()) -> list[str]:
         return [
             str(self.binary),
             "--url", ENDPOINT,
             "--api-key", "vast",
             "--model", model,
             "--output", str(result),
+            *run_args,
             *self.manifest["benchmark_args"],
         ]  # fmt: skip
 
@@ -341,7 +409,9 @@ class Runner:
             if not path.is_file():
                 continue
             try:
-                self.storage.put_file(key(self.batch, "logs", path.name), path)
+                # Relative to logs/, so that the rejected runs of different models keep apart.
+                name = path.relative_to(self.work / "logs").as_posix()
+                self.storage.put_file(key(self.batch, "logs", name), path)
             except Exception as error:  # A missing log must not fail the model.
                 say(f"could not upload {path.name}: {error}")
 

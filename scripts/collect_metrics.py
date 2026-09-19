@@ -52,10 +52,6 @@ DETAIL_COLUMNS = [
     "file_bytes",
 ]
 
-# Written by the vast.ai runner next to a run: GPU, timings and cost of that run.
-SIDECAR_SUFFIX = ".vast.json"
-
-
 def _section_value(payload: Mapping[str, Any], section_name: str, key: str) -> Any:
     section = payload.get(section_name)
     if not isinstance(section, Mapping):
@@ -78,9 +74,7 @@ def _load_costs(cost_file: Path) -> dict[str, str]:
 
 def _results(results_dir: Path) -> Iterator[tuple[Path, Mapping[str, Any], Mapping[str, Any]]]:
     """Yield ``(path, payload, provenance)`` for every JSON result below ``results_dir``."""
-    for result_file in sorted(results_dir.rglob("*.json")):
-        if result_file.name.endswith(SIDECAR_SUFFIX):
-            continue
+    for result_file in model_info.run_files(results_dir):
         with result_file.open(encoding="utf-8") as handle:
             payload = json.load(handle)
 
@@ -92,7 +86,7 @@ def _results(results_dir: Path) -> Iterator[tuple[Path, Mapping[str, Any], Mappi
 
 def _sidecar_cost(result_file: Path) -> str | None:
     """The GPU cost of a vast.ai run, from the sidecar next to it."""
-    sidecar = result_file.with_name(result_file.name.removesuffix(".json") + SIDECAR_SUFFIX)
+    sidecar = result_file.with_name(result_file.name.removesuffix(".json") + model_info.SIDECAR_SUFFIX)
     if not sidecar.is_file():
         return None
     with sidecar.open(encoding="utf-8") as handle:

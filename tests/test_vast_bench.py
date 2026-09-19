@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,8 +40,9 @@ class FakeStorage:
 
 
 class FakeVast:
-    def __init__(self, offers=(), instances=()):
+    def __init__(self, offers=(), instances=(), unavailable=()):
         self.offers = list(offers)
+        self.unavailable = unavailable
         self.listed = list(instances)
         self.queries = []
         self.created = []
@@ -51,6 +53,8 @@ class FakeVast:
         return self.offers
 
     def create_instance(self, offer_id, body):
+        if offer_id in self.unavailable:
+            raise vast_bench.VastError(f"vast.ai PUT /asks/{offer_id}/ failed with 400: no_such_ask")
         self.created.append((offer_id, body))
         return 1000 + len(self.created)
 
@@ -128,6 +132,7 @@ class LaunchTests(unittest.TestCase):
             offers=3,
             image="vllm/vllm-openai:test",
             pip=[],
+            prompts=None,
         )
         values.update(changes)
         return argparse.Namespace(**values)
@@ -172,6 +177,19 @@ class LaunchTests(unittest.TestCase):
         self.assertIn("bash onstart.sh", body["onstart"])
         self.assertEqual(vast.queries[0]["gpu_ram"], {"gte": 24000})
 
+    def test_uploads_the_instance_scripts_with_unix_line_ends(self):
+        scripts = Path(self.temp.name) / "vast"
+        scripts.mkdir()
+        for name in RUNNER_FILES:
+            (scripts / name).write_bytes(b"#!/usr/bin/env bash\r\nset -eu\r\n")
+        storage = FakeStorage()
+
+        with mock.patch.object(vast_bench, "HERE", scripts):
+            batch = self.launch(FakeVast(OFFERS), storage, boots=[True])
+
+        for name in RUNNER_FILES:
+            self.assertEqual(storage.objects[f"kolla/{batch}/{name}"], b"#!/usr/bin/env bash\nset -eu\n")
+
     def test_records_extra_packages_for_the_instance(self):
         storage = FakeStorage()
 
@@ -179,6 +197,29 @@ class LaunchTests(unittest.TestCase):
 
         manifest = json.loads(storage.objects[f"kolla/{batch}/batch.json"])
         self.assertEqual(manifest["pip"], ["cohere-melody>=0.11.1"])
+
+    def test_records_the_prompt_list_for_the_instance(self):
+        prompts = Path(self.temp.name) / "prompts.json"
+        prompts.write_text('[{"name": "a", "user": "{sentence}"}, {"system": "S", "user": "{sentence}"}]', encoding="utf-8")
+        storage = FakeStorage()
+
+        batch = self.launch(FakeVast(OFFERS), storage, boots=[True], prompts=str(prompts))
+
+        manifest = json.loads(storage.objects[f"kolla/{batch}/batch.json"])
+        self.assertEqual(manifest["prompts"], [{"name": "a", "user": "{sentence}"}, {"system": "S", "user": "{sentence}"}])
+
+    def test_refuses_a_broken_prompt_list_or_prompt_flags_before_renting(self):
+        prompts = Path(self.temp.name) / "prompts.json"
+        prompts.write_text('[{"user": "{sentence}"}]', encoding="utf-8")
+        broken = Path(self.temp.name) / "broken.json"
+        broken.write_text('[{"user": "no placeholder"}]', encoding="utf-8")
+        vast = FakeVast(OFFERS)
+
+        with self.assertRaises(SystemExit):
+            self.launch(vast, FakeStorage(), boots=[True], prompts=str(broken))
+        with self.assertRaises(SystemExit):
+            self.launch(vast, FakeStorage(), boots=[True], benchmark_args=["--system", "S"], prompts=str(prompts))
+        self.assertEqual(vast.created, [])
 
     def test_pip_option_collects_every_package(self):
         options, _ = vast_bench.parse_args(["launch", "--models", "m.txt", "--pip", "a>=1", "--pip", "b"])
@@ -190,6 +231,21 @@ class LaunchTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit):
             self.launch(vast, FakeStorage(), boots=[True], benchmark_args=["--model", "x"])
+        self.assertEqual(vast.created, [])
+
+    def test_skips_an_offer_that_is_listed_but_cannot_be_rented(self):
+        vast = FakeVast(OFFERS, unavailable=(1,))
+
+        batch = self.launch(vast, FakeStorage(), boots=[True])
+
+        self.assertEqual(batch, "20260915-120000")
+        self.assertEqual([offer for offer, _ in vast.created], [2])
+
+    def test_gives_up_when_no_offer_can_be_rented(self):
+        vast = FakeVast(OFFERS, unavailable=(1, 2))
+
+        with self.assertRaises(SystemExit):
+            self.launch(vast, FakeStorage(), boots=[])
         self.assertEqual(vast.created, [])
 
     def test_gives_up_after_the_offers_it_may_try(self):
@@ -272,6 +328,11 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(fetched, 2)
             self.assertEqual(storage.downloads, ["kolla/B/results/a.vast.json", "kolla/B/logs/a.vllm.log"])
             self.assertTrue((destination / "B" / "logs" / "a.vllm.log").is_file())
+
+    def test_prompt_batches_are_pulled_next_to_the_other_prompt_runs(self):
+        self.assertEqual(vast_bench.default_results_dir({"prompts": []}).name, "results")
+        self.assertEqual(vast_bench.default_results_dir(None).name, "results")
+        self.assertEqual(vast_bench.default_results_dir({"prompts": [{"user": "{sentence}"}]}).name, "multiprompt-results")
 
     def test_destroy_only_touches_the_batch_instance(self):
         vast = FakeVast(instances=[{"id": 1, "label": "kolla-B"}, {"id": 2, "label": "something else"}])

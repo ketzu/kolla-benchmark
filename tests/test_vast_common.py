@@ -116,6 +116,44 @@ class ReasoningLeakTests(unittest.TestCase):
         )
 
 
+class PromptListTests(unittest.TestCase):
+    def test_reads_the_repository_prompt_list(self):
+        prompts_file = Path(__file__).resolve().parents[1] / "scripts" / "prompts.json"
+        prompts = common.load_prompts(prompts_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(prompts), 8)
+        self.assertEqual(common.prompt_label(1, prompts[0]), "p1 extended/user")
+        self.assertEqual(common.prompt_label(8, prompts[7]), "p8 simple/system+user")
+
+    def test_refuses_lists_the_benchmark_would_not_run(self):
+        for text in (
+            "[]",
+            "{}",
+            '[{"system": "no user"}]',
+            '[{"user": "no placeholder"}]',
+            '[{"user": "{sentence}", "system": 3}]',
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                common.load_prompts(text)
+
+    def test_arguments_send_the_prompt_the_way_the_benchmark_reads_it(self):
+        with_system = {"name": "s", "system": "Be brief.", "user": "{sentence}"}
+        user_only = {"user": "Fix: {sentence}"}
+
+        self.assertEqual(common.prompt_args(with_system), ["--system", "Be brief.", "--prompt", "{sentence}"])
+        self.assertEqual(common.prompt_label(2, user_only), "p2 unnamed/user")
+        self.assertEqual(
+            common.benchmark_messages(common.prompt_args(user_only), "문장"),
+            [{"role": "user", "content": "Fix: 문장"}],
+        )
+
+    def test_a_prompt_list_excludes_prompt_flags(self):
+        common.check_benchmark_args(["--prompt", "{sentence}"])
+        for args in (["--prompt", "{sentence}"], ["--system=Be brief."]):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                common.check_benchmark_args(args, prompts=True)
+
+
 class HelperTests(unittest.TestCase):
     def test_safe_name_matches_run_models(self):
         self.assertEqual(common.safe_name("Qwen/Qwen3-8B-FP8"), "Qwen_Qwen3-8B-FP8")

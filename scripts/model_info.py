@@ -8,7 +8,7 @@ hand-maintained model info file.
 from __future__ import annotations
 
 import csv
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -20,6 +20,9 @@ INFO_COLUMNS = COLUMNS[1:]
 # Everything the model info file describes, including the name shown on the presentation page.
 FILE_COLUMNS = ["display_name", *INFO_COLUMNS]
 
+# Written by the vast.ai runner next to a run: GPU, timings and cost of that run, not a run itself.
+SIDECAR_SUFFIX = ".vast.json"
+
 # Providers by the host of their endpoint; any other endpoint is named by its host.
 KNOWN_HOSTS = {
     "openrouter.ai": "OpenRouter",
@@ -29,6 +32,13 @@ KNOWN_HOSTS = {
     # The name the vast.ai runner gives the vLLM server on its instance, see scripts/vast.
     "vast.local": "Vast.ai",
 }
+
+
+def run_files(results_dir: Path) -> Iterator[Path]:
+    """Every run below ``results_dir``, in a stable order, without the vast.ai sidecars."""
+    for path in sorted(results_dir.rglob("*.json")):
+        if not path.name.endswith(SIDECAR_SUFFIX):
+            yield path
 
 
 def provider(endpoint: str | None) -> str:
