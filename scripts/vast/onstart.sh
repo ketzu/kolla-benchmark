@@ -43,6 +43,8 @@ python3 -m pip install --quiet boto3 ||
     uv pip install --system --break-system-packages --quiet boto3 ||
     fail "could not install boto3"
 python3 runner.py phase booting || fail "could not write the batch status"
+# Packages a batch asked for with launch --pip, e.g. cohere-melody for Cohere's reasoning parser.
+python3 runner.py install || fail "could not install the extra packages"
 
 python3 runner.py phase building || true
 if [ ! -x source/target/release/kolla-benchmark ]; then

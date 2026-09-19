@@ -250,6 +250,35 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((record["state"], record["error"]), ("failed", "interrupted 2 times"))
 
 
+class InstallPackagesTests(unittest.TestCase):
+    def test_nothing_to_install(self):
+        commands = []
+
+        self.assertTrue(runner.install_packages({"pip": []}, lambda command: commands.append(command) or 0))
+        self.assertTrue(runner.install_packages({}, lambda command: commands.append(command) or 0))
+        self.assertEqual(commands, [])
+
+    def test_installs_the_batch_packages(self):
+        commands = []
+
+        installed = runner.install_packages({"pip": ["cohere-melody>=0.11.1"]}, lambda command: commands.append(command) or 0)
+
+        self.assertTrue(installed)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][-1], "cohere-melody>=0.11.1")
+        self.assertIn("pip", commands[0])
+
+    def test_falls_back_when_pip_refuses_and_reports_total_failure(self):
+        commands = []
+
+        installed = runner.install_packages({"pip": ["a"]}, lambda command: commands.append(command) or 1)
+
+        self.assertFalse(installed)
+        self.assertGreaterEqual(len(commands), 2)
+        self.assertTrue(any("--break-system-packages" in command for command in commands))
+        self.assertTrue(all(command[-1] == "a" for command in commands))
+
+
 class CurrentStatusTests(unittest.TestCase):
     manifest = {"batch": "B", "models": [{"model": "a/one", "vllm_args": []}]}
     env = {"CONTAINER_ID": "42", "KOLLA_GPU_NAME": "H100", "KOLLA_DPH": "2.5", "GPU_COUNT": "2"}

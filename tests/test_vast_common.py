@@ -79,6 +79,8 @@ class ReasoningLeakTests(unittest.TestCase):
             ("<thought>hmm</thought>목요일", "<thought>"),
             ("[THINK]hmm[/THINK]목요일", "[THINK]"),
             ("<|channel|>analysis<|message|>hmm", "<|channel|>"),
+            ("<|START_THINKING|>hmm<|END_THINKING|>목요일", "<|START_THINKING|>"),
+            ("hmm<|END_THINKING|>목요일", "<|END_THINKING|>"),
         ):
             with self.subTest(answer=answer):
                 self.assertEqual(common.leaked_reasoning(answer), marker)

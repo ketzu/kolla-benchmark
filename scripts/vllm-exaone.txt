@@ -1,0 +1,5 @@
+# EXAONE 4.5 retry, see scripts/vast/vast_bench.py
+# The model card's own vLLM command uses the qwen3 reasoning parser (<think> tags).
+# First attempt died with "CUDA error: unspecified launch failure" while decoding on an
+# RTX PRO 6000; if it happens again, add --enforce-eager next.
+LGAI-EXAONE/EXAONE-4.5-33B --reasoning-parser qwen3

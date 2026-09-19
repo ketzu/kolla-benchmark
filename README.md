@@ -81,7 +81,9 @@ per-instance key.
 
 Models are listed like [scripts/vllm.txt](scripts/vllm.txt): a Hugging Face repo per line in
 a format vLLM serves natively (BF16, FP8, INT8, AWQ, GPTQ), optionally followed by extra
-`vllm serve` flags. `--max-model-len 16384` is added unless a line sets it, and
+`vllm serve` flags. `--max-model-len 16384`, `--max-num-seqs 128` and `--language-model-only` (the benchmark only
+sends text, so vision encoders are neither loaded nor profiled) are added unless a line sets
+them, and
 `--tensor-parallel-size` when the instance has more than one GPU.
 
 Reasoning models need the matching `--reasoning-parser` (e.g. `qwen3`, `gemma4`), or vLLM
@@ -99,7 +101,7 @@ uv run scripts/vast/vast_bench.py destroy
 
 | Command | Description |
 |---|---|
-| `launch` | Rent the cheapest offer matching `--gpu` (vast.ai filter syntax, `gpu_ram` in GB), `--disk` (200 GB) and `--max-dph`, then start the batch. Offers that do not boot within `--boot-timeout` (30m) are destroyed and the next is tried. `--deadline` (12h) destroys the instance no matter what. Everything after `--` goes to the benchmark. |
+| `launch` | Rent the cheapest offer matching `--gpu` (vast.ai filter syntax, `gpu_ram` in GB), `--disk` (200 GB) and `--max-dph`, then start the batch. Offers that do not boot within `--boot-timeout` (30m) are destroyed and the next is tried. `--deadline` (12h) destroys the instance no matter what. `--pip PACKAGE` (repeatable) installs extra Python packages on the instance before serving, e.g. `cohere-melody` for Cohere's reasoning parser. Everything after `--` goes to the benchmark. |
 | `status [BATCH]` | Phase, GPU, cost so far, last heartbeat, and the state and F0.5 of every model. |
 | `pull [BATCH]` | Download the runs into `results/<batch>/`; `--logs` also fetches the vLLM and benchmark logs. |
 | `destroy [BATCH]` | Destroy the batch's instance by hand. |

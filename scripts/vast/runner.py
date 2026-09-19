@@ -2,6 +2,7 @@
 """Run a benchmark batch on a rented vast.ai instance.
 
     runner.py phase booting|building|failed   record the phase with a heartbeat
+    runner.py install                          install the batch's extra pip packages
     runner.py fetch                            download and unpack the benchmark source
     runner.py run                              serve and benchmark every model of the batch
     runner.py upload-log                       upload logs/runner.log
@@ -24,7 +25,7 @@ import tarfile
 import threading
 import time
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -371,6 +372,26 @@ def current_status(storage: Storage, env: Mapping[str, str], manifest: Mapping[s
     return status
 
 
+def install_packages(manifest: Mapping[str, Any], run: Callable[[list[str]], int]) -> bool:
+    """Install the packages the batch asked for with launch --pip; True when there are none."""
+    packages = list(manifest.get("pip") or [])
+    if not packages:
+        return True
+    # The image's Python may be marked externally managed, hence the fallbacks.
+    attempts = (
+        [sys.executable, "-m", "pip", "install", "--quiet"],
+        [sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages"],
+        ["uv", "pip", "install", "--system", "--break-system-packages", "--quiet"],
+    )
+    for command in attempts:
+        try:
+            if run([*command, *packages]) == 0:
+                return True
+        except OSError:  # uv is not in every image
+            continue
+    return False
+
+
 def destroy_instance(env: Mapping[str, str], attempts: int = 5) -> None:
     request = urllib.request.Request(
         f"{VAST_API}/instances/{env['CONTAINER_ID']}/",
@@ -393,7 +414,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     phase = commands.add_parser("phase")
     phase.add_argument("phase", choices=["booting", "building", "failed"])
-    for name in ("fetch", "run", "upload-log", "destroy"):
+    for name in ("install", "fetch", "run", "upload-log", "destroy"):
         commands.add_parser(name)
     args = parser.parse_args(argv)
 
@@ -418,6 +439,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = read_json(storage, key(batch, "batch.json"))
     if manifest is None:
         raise SystemExit(f"no batch.json for batch {batch}")
+    if args.command == "install":
+        installed = install_packages(manifest, lambda command: subprocess.run(command).returncode)
+        return 0 if installed else 1
     status = current_status(storage, env, manifest)
     if args.command == "phase":
         status["phase"] = args.phase

@@ -299,6 +299,7 @@ def launch(
         "deadline_seconds": deadline_seconds,
         "models": manifest_models(entries),
         "benchmark_args": benchmark_args,
+        "pip": list(options.pip),
     }
     storage.put_bytes(key(batch, "batch.json"), json.dumps(manifest, indent=2).encode())
     print(f"batch {batch}: {len(entries)} models, commit {commit[:12]}{' with local changes' if dirty else ''}")
@@ -387,6 +388,14 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     start.add_argument("--boot-timeout", default="30m", help="give up on an offer after this long (default 30m)")
     start.add_argument("--offers", type=int, default=3, help="offers to try before giving up (default 3)")
     start.add_argument("--image", default=IMAGE, help=f"vLLM image (default {IMAGE})")
+    start.add_argument(
+        "--pip",
+        action="append",
+        default=[],
+        metavar="PACKAGE",
+        help="Python package to install on the instance before serving, repeatable, "
+        "e.g. 'cohere-melody>=0.11.1' for Cohere's reasoning parser",
+    )
     for name, text in (("status", "show the progress of a batch"), ("destroy", "destroy a batch's instance")):
         commands.add_parser(name, help=text).add_argument("batch", nargs="?")
     fetch = commands.add_parser("pull", help="download the results of a batch into results/<batch>/")

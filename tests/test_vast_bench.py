@@ -127,6 +127,7 @@ class LaunchTests(unittest.TestCase):
             boot_timeout="30m",
             offers=3,
             image="vllm/vllm-openai:test",
+            pip=[],
         )
         values.update(changes)
         return argparse.Namespace(**values)
@@ -170,6 +171,19 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn("account-secret", json.dumps(body))
         self.assertIn("bash onstart.sh", body["onstart"])
         self.assertEqual(vast.queries[0]["gpu_ram"], {"gte": 24000})
+
+    def test_records_extra_packages_for_the_instance(self):
+        storage = FakeStorage()
+
+        batch = self.launch(FakeVast(OFFERS), storage, boots=[True], pip=["cohere-melody>=0.11.1"])
+
+        manifest = json.loads(storage.objects[f"kolla/{batch}/batch.json"])
+        self.assertEqual(manifest["pip"], ["cohere-melody>=0.11.1"])
+
+    def test_pip_option_collects_every_package(self):
+        options, _ = vast_bench.parse_args(["launch", "--models", "m.txt", "--pip", "a>=1", "--pip", "b"])
+
+        self.assertEqual(options.pip, ["a>=1", "b"])
 
     def test_refuses_benchmark_flags_the_runner_owns(self):
         vast = FakeVast(OFFERS)

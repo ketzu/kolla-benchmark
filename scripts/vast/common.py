@@ -40,7 +40,13 @@ SIDECAR_SUFFIX = ".vast.json"
 # The benchmark's --prompt default, see src/openai.rs.
 DEFAULT_PROMPT = "Correct the Korean sentence. Reply with the corrected sentence only."
 # Only found in an answer when the server did not split the reasoning off.
-REASONING_MARKERS = ("<think>", "</think>", "<thought>", "</thought>", "[THINK]", "[/THINK]", "<|channel|>")
+REASONING_MARKERS = (
+    "<think>", "</think>",
+    "<thought>", "</thought>",
+    "[THINK]", "[/THINK]",
+    "<|channel|>",
+    "<|START_THINKING|>", "<|END_THINKING|>",
+)  # fmt: skip
 
 
 @dataclass(frozen=True)
